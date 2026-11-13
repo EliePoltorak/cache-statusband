@@ -1,241 +1,96 @@
-// ONE Retry-After parser, used for the structured error data and for the error message.
+// Retry-After, read from exactly two places. Nothing else is ever read; in particular no prose
+// ("retry after 20 minutes", "retry at ...") is parsed.
 //
-// The rule is a strict grammar, not a search; nothing is scanned for a wait further on.
-// A message has two kinds of key:
-//   * HEADER form: only the spellings with no whitespace in them, "Retry-After", "retry-after",
-//     "retry_after", "RetryAfter" or "retryAfter", with or without a unit suffix in the key name
-//     (retry_after_seconds, retry-after-ms), followed by ":" or "=" (an optional closing quote
-//     and spaces may come first).
-//   * PROSE form: every other "retry after" or "retry at" (or the hyphen/underscore spellings,
-//     any case) followed by a space, ":" or "=". "retry after:", "retry at:", "retryAt:" and
-//     "retry at =" are prose: the ":" or "=" is just a prefix token.
-// What is read is only what comes IMMEDIATELY after the key (spaces, ":", "=", a spaced dash, a
-// quote, "(", "~" and the filler words in, about, approximately, around, at least are skipped), as one of:
-//   * a duration: number+unit pairs (30s, 5 minutes, "1 hour 30 minutes"); pairs in falling order
-//     are summed (1h30m); a number range sharing one unit ("5-10 minutes", "5 to 10 min", "5-10m")
-//     is its larger number with the unit; and a list of durations joined by "or", "to", "and", "&",
-//     "-", an en or em dash, a comma or spaces and tabs ("30 minutes or 2 hours", "30 minutes and
-//     1 hour", "5m-3h", "1m 2h") is the LONGEST item. Neither a joiner nor a compound ever reaches
-//     across a line break: the next line is not read;
-//   * a moment: ISO 8601 (no zone = UTC), a zone after a space, or an HTTP-date; a date with no
-//     time is the end of that day, UTC. A time with no zone that is followed by a space and a
-//     letter or "(" ("12:30 EST", "12:30:00 America/New_York", "12:30 (UTC+2)") names a zone we
-//     do not read, so it is unparsed, never UTC;
-//   * a bare whole number (seconds, or the unit the key name gave), only when followed by the end
-//     of the text, a newline, whitespace and then the end, or one of . , ; ) ] } (never before
-//     ( ' " or a digit). If the text between the key and the number included a quote, that same
-//     quote may directly follow the number ('Retry-After: "30"', {"retry_after":"120"}). After a
-//     HEADER key the number may also be decimal (Retry-After: 30.5 is 30.5 seconds).
-// A value that is not one of these is UNPARSED. After a PROSE key that means there is no key at
-// all (so "retry after reconnecting", "retry at most 3 times" and "retry at any time" are
-// nothing). After a HEADER key it means the server named a Retry-After it did not make readable,
-// which answers with the longest wait we ever honour, MAX_RETRY_AFTER_MS. "null" or "none" after
-// either key is no key. No key at all answers null (the caller's own five-minute floor).
-// A parsed wait, structured or in text, always wins over a cap: the cap answers only when no
-// value parsed at all. A retry key whose structured value is an object is read as {secs, nanos},
-// {seconds} or {ms}; any other non-null object, array or boolean is the cap.
-// The result is never negative or NaN; a moment already past is 0.
+// 1. STRUCTURED error data (the rpcData object, walked to a depth of 8): a key that starts with
+//    retry_after or retry_at (also retry-after, retryAfter, RetryAt ...), optionally followed by a
+//    unit word in snake, kebab or camel case (retry_after_ms, retry-after-seconds, retryAfterMs,
+//    retryAtMs). The value is read as:
+//      * a number, in the key's unit (seconds when it has none); retry_at without a duration unit
+//        is a moment as an epoch count (seconds, or milliseconds for retry_at_ms);
+//      * a string: a plain non-negative integer or decimal (read like a number), an HTTP-date, or
+//        an ISO 8601 date-time with a zone (Z, +hh, +hhmm, +hh:mm; no zone = UTC);
+//      * an object {secs, nanos}, {seconds} or {ms};
+//      * null or undefined: nothing.
+//    Any other string, object, array or boolean is "named but unreadable", which is the cap.
+// 2. HTTP header LINES in the error message (RFC 9110). The message is split on CRLF, LF or CR. A
+//    line that, after optional leading whitespace, starts with "Retry-After" (any case), optional
+//    whitespace and ":" has the rest of the line, trimmed, as its value; a JSON header dump
+//    ("retry-after": "30" or "retry-after": 30, anywhere in a line) has its quoted or bare token
+//    as its value. One pair of surrounding double quotes on a value is dropped. The value must be
+//    delay-seconds (a non-negative integer) or an HTTP-date (IMF-fixdate, obsolete RFC 850, or
+//    asctime); a Retry-After with any other value is the cap.
+//
+// A wait that parsed always beats a cap; the cap answers only when no value parsed at all. No key
+// anywhere answers null (the caller's own five-minute floor). The result is never negative or NaN,
+// and a moment already past is 0.
 
 export const MAX_RETRY_AFTER_MS = 60 * 60 * 1000;
 
-const MS = 1;
 const SECOND = 1000;
 const MINUTE = 60_000;
 const HOUR = 3_600_000;
-const DAY = 86_400_000;
-const WEEK = 7 * DAY;
-
-const NUMBER = String.raw`(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|\.\d+)`;
-// Longest alternatives first; the lookahead stops a unit from being the start of a longer word
-// ("3 more messages" is not 3 minutes). A digit may follow it (1h30m); the pair loop checks that.
-const UNIT = String.raw`(ms|msecs?|milliseconds?|secs?|seconds?|mins?|minutes?|hrs?|hours?|days?|weeks?|wks?|s|m|h|d|w)(?![a-z])`;
-// "5 minutes", "5 more minutes", "5 (minutes)".
-const PAIR = new RegExp(String.raw`${NUMBER}\s*\(?\s*(?:more\s+)?${UNIT}\)?`, "iy");
-// Two numbers sharing one unit: "5-10 minutes", "5 to 10 min", "5–10m" (the larger, with the unit).
-const RANGE = new RegExp(String.raw`${NUMBER}\s*(?:-|–|—|to(?![a-z0-9]))\s*${NUMBER}\s*\(?\s*(?:more\s+)?${UNIT}\)?`, "iy");
-// Between the pairs of one compound duration: spaces and tabs only, never a line break.
-const SEPARATOR = /[ \t]*(?:,|and(?![a-z0-9])|&)?[ \t]*/iy;
-// A bare number is read in steps: its digits (whole after a prose key, whole or decimal after a
-// header key), an optional closing quote, then what may follow: the end of the text, a newline,
-// whitespace and then the end, or one of . , ; ) ] } (a "." or "," before a digit is a decimal or a
-// list, not an end). Never before ( ' ".
-const BARE_WHOLE = /(\d{1,3}(?:,\d{3})+|\d+)/y;
-const BARE_DECIMAL = /(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)/y;
-const BARE_END = /(?=[ \t]*(?:\r?\n|$)|[.,](?!\d)|[;)\]}])/y;
-// Between two durations of a list: spaces and tabs (never a line break), a comma, a dash, or the
-// words or, to, and, &.
-const JOINER = /(?:[ \t]|,|-|–|—|&|(?:or|to|and)(?![a-z0-9]))+/iy;
-// The header spellings of the key: no whitespace anywhere in it.
-const HEADER_KEY = /^retry[_-]?after(?:[_-]+(?:ms|milliseconds?|secs?|seconds?|mins?|minutes?|hrs?|hours?|s|m|h))?$/i;
-// What follows a time that has no zone when the next word is one we do not read: "12:30 EST", "12:30 (UTC+2)".
-const ZONE_WORD = /^[ \t]+[A-Za-z(]/;
-const NULLISH = /^(?:null|none)(?![a-z0-9])/i;
-const WORD_END = /[A-Za-z0-9]/y;
-const ISO = String.raw`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s?(?:Z|UTC|GMT|[+-]\d{2}:?\d{2}))?)?`;
-const MONTHS = "Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec";
-// RFC 9110: "Fri, 13 Nov 2026 12:30:00 GMT".
-const HTTP_DATE = String.raw`(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+)?\d{1,2}\s+(?:${MONTHS})[a-z]*\s+\d{4}\s+\d{2}:\d{2}(?::\d{2})?(?:\s?(?:GMT|UTC|Z|[+-]\d{2}:?\d{2}))?`;
-const MOMENT = new RegExp(String.raw`(?:${ISO}|${HTTP_DATE})(?![A-Za-z0-9])`, "iy");
-// "retry after" / "retry-after" / "retry at", with an optional unit in the key name
-// (retry_after_seconds, retry-after-ms, "retry after ms"). What follows decides header or prose.
-const KEY = /retry[\s_-]*(?:after|at)(?![a-z0-9])(?:(?:[_-]+|\s+(?=ms\b|milliseconds?\b))(ms|milliseconds?|secs?|seconds?|mins?|minutes?|hrs?|hours?|s|m|h)\b)?/gi;
-// What may sit between the key and the value: spaces, ":" or "=", a spaced dash, "in", a quote or
-// "(", and a small fixed list of filler. Each token consumes at least one character.
-const PREFIX_TOKEN = /(?:\s+[-–—]\s+|\s+|[:="'(~]|(?:in|about|approximately|around|at\s+least)(?![a-z0-9]))/iy;
-const PREFIX_LIMIT = 16;
-// After a header key: an optional closing quote, then ":" or "=".
-const HEADER_SEPARATOR = /^["']?\s*[:=]/;
-// A moment or a duration is far shorter than this; the rest of a long message is never looked at.
-const TAIL_CHARS = 160;
-const STRING_CHARS = 200;
 const MAX_DEPTH = 8;
+const STRING_CHARS = 200;
 
-export function unitMilliseconds(unit) {
-  const name = String(unit).toLowerCase();
-  if (name.startsWith("ms") || name.startsWith("milli")) return MS;
-  if (name.startsWith("w")) return WEEK;
-  if (name.startsWith("d")) return DAY;
+const STRUCTURED_KEY = /^retry[_-]?(after|at)(?:[_-]?(ms|milliseconds?|secs?|seconds?|mins?|minutes?|hrs?|hours?|s|m|h))?$/i;
+const PLAIN_NUMBER = /^(?:\d+(?:\.\d+)?|\.\d+)$/;
+const DELAY_SECONDS = /^\d+$/;
+const ISO_DATE_TIME = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(Z|[+-]\d{2}(?::?\d{2})?)?$/i;
+// One JSON header-map entry: "retry-after": "30" or "retry-after": 30 (value at most STRING_CHARS).
+const JSON_HEADER = /"retry-after"\s*:\s*(?:"([^"]{0,200})"|([^,}\]\s]{0,200}))/gi;
+const MONTH = "(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)";
+const TIME = "(\\d{2}):(\\d{2}):(\\d{2})";
+const IMF_DATE = new RegExp(`^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), (\\d{2}) ${MONTH} (\\d{4}) ${TIME} GMT$`, "i");
+const RFC850_DATE = new RegExp(`^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (\\d{2})-${MONTH}-(\\d{2}) ${TIME} GMT$`, "i");
+const ASCTIME_DATE = new RegExp(`^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) ${MONTH} {1,2}(\\d{1,2}) ${TIME} (\\d{4})$`, "i");
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+
+function unitMilliseconds(unit) {
+  const name = unit.toLowerCase();
+  if (name.startsWith("ms") || name.startsWith("milli")) return 1;
   if (name.startsWith("h")) return HOUR;
   if (name.startsWith("m")) return MINUTE;
   return SECOND;
 }
 
-// A moment: ISO with a zone, ISO with none (UTC), or an HTTP-date. Milliseconds since the epoch, or NaN.
-function momentTime(text) {
-  const iso = text.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?:\s?(Z|UTC|GMT|[+-]\d{2}:?\d{2}))?)?$/i);
-  if (iso) {
-    const [, date, time, zone = ""] = iso;
-    // A date with no time is the end of that day (UTC).
-    if (!time) return Date.parse(date) + DAY;
-    const offset = /^[+-]/.test(zone) ? (zone.includes(":") ? zone : `${zone.slice(0, 3)}:${zone.slice(3)}`) : "Z";
-    return Date.parse(`${date}T${time}${offset}`);
+// Milliseconds since the epoch for a real calendar moment (UTC), or NaN.
+function utcTime(year, month, day, hour, minute, second) {
+  const time = Date.UTC(year, month, day, hour, minute, second);
+  const check = new Date(time);
+  const real = check.getUTCDate() === day && check.getUTCMonth() === month && hour < 24 && minute < 60 && second <= 60;
+  return real ? time : NaN;
+}
+
+// An RFC 9110 HTTP-date in any of its three forms, as milliseconds since the epoch, or NaN.
+function httpDate(text, now) {
+  let match = IMF_DATE.exec(text);
+  if (match) return utcTime(+match[3], MONTHS.indexOf(match[2].toLowerCase()), +match[1], +match[4], +match[5], +match[6]);
+  match = RFC850_DATE.exec(text);
+  if (match) {
+    // A two-digit year more than 50 years ahead of now means the most recent matching past year.
+    let year = Math.floor(new Date(now).getUTCFullYear() / 100) * 100 + +match[3];
+    if (year > new Date(now).getUTCFullYear() + 50) year -= 100;
+    return utcTime(year, MONTHS.indexOf(match[2].toLowerCase()), +match[1], +match[4], +match[5], +match[6]);
   }
-  // An HTTP-date with no zone is UTC, as the format always is.
-  return Date.parse(/(?:GMT|UTC|Z|[+-]\d{2}:?\d{2})$/i.test(text) ? text : `${text} GMT`);
+  match = ASCTIME_DATE.exec(text);
+  if (match) return utcTime(+match[6], MONTHS.indexOf(match[1].toLowerCase()), +match[2], +match[3], +match[4], +match[5]);
+  return NaN;
 }
 
-function toNumber(text) {
-  return Number(text.replaceAll(",", ""));
+// An ISO 8601 date-time as milliseconds since the epoch (no zone = UTC), or NaN.
+function isoDate(text) {
+  const match = ISO_DATE_TIME.exec(text);
+  if (!match) return NaN;
+  const [, date, time, zone = "Z"] = match;
+  const offset = zone.length === 3 ? `${zone}:00` : zone.length === 5 ?`${zone.slice(0, 3)}:${zone.slice(3)}` : zone;
+  return Date.parse(`${date}T${time}${offset.toUpperCase()}`);
 }
 
-function matchAt(regex, text, at) {
-  regex.lastIndex = at;
-  return regex.exec(text);
-}
-
-// One pair read at `at`: a number with a unit, or two numbers sharing one unit ("5-10 minutes":
-// the larger). {number, unit, end}, or null.
-function matchPair(tail, at) {
-  const range = matchAt(RANGE, tail, at);
-  if (range) return { number: Math.max(toNumber(range[1]), toNumber(range[2])), unit: range[3], end: range.index + range[0].length };
-  const pair = matchAt(PAIR, tail, at);
-  return pair ? { number: toNumber(pair[1]), unit: pair[2], end: pair.index + pair[0].length } : null;
-}
-
-// A compound duration read at `from`: pairs in falling order are one wait (1h30m, "1 hour and 30
-// minutes"), and it must end at a word boundary (7d9f3, 41d4 and 8d1e are not durations).
-// {total, end}, or null.
-function readDuration(tail, from) {
-  let total = 0;
-  let scale = Infinity;
-  let end = from;
-  for (;;) {
-    let pairAt = from;
-    if (end > from) {
-      const separator = matchAt(SEPARATOR, tail, end);
-      pairAt = end + (separator ? separator[0].length : 0);
-    }
-    const pair = matchPair(tail, pairAt);
-    if (!pair) break;
-    const pairScale = unitMilliseconds(pair.unit);
-    if (pairScale >= scale) break;
-    total += pair.number * pairScale;
-    scale = pairScale;
-    end = pair.end;
-  }
-  if (end === from || matchAt(WORD_END, tail, end)) return null;
-  return { total, end };
-}
-
-// A bare number at the start of `tail`, in `defaultUnit`: whole after a prose key, whole or decimal
-// after a header key. When the text before it included a quote, that quote may close it. null when
-// what follows is not one of the allowed ends.
-function readBare(tail, defaultUnit, header, quote) {
-  const digits = matchAt(header ? BARE_DECIMAL : BARE_WHOLE, tail, 0);
-  if (!digits) return null;
-  let end = digits[0].length;
-  if (quote && tail[end] === quote) end += 1;
-  return matchAt(BARE_END, tail, end) ? toNumber(digits[1]) * defaultUnit : null;
-}
-
-// The wait stated by `text` read from its start, in milliseconds; null when it is not one of the
-// forms (unparsed); NO_VALUE for "null" / "none". `defaultUnit` is what a bare number counts in
-// (seconds, or the unit the key name gave); `header` is true after a header key. Text after a
-// complete duration or moment is not read.
-const NO_VALUE = Symbol("no value");
-function waitFromTail(text, now, defaultUnit = SECOND, header = false) {
-  let at = 0;
-  let quote = "";
-  for (let i = 0; i < PREFIX_LIMIT; i += 1) {
-    const token = matchAt(PREFIX_TOKEN, text, at);
-    if (!token) break;
-    if (token[0] === '"' || token[0] === "'") quote = token[0];
-    at += token[0].length;
-  }
-  const tail = text.slice(at, at + TAIL_CHARS);
-  if (NULLISH.test(tail)) return NO_VALUE;
-  const moment = matchAt(MOMENT, tail, 0);
-  if (moment) {
-    // A time with no zone, then a space and a word or "(": a zone we do not read, never UTC.
-    const zoneless = /:\d{2}(?:\.\d+)?$/.test(moment[0]) && !/(?:Z|UTC|GMT|[+-]\d{2}:?\d{2})$/i.test(moment[0]);
-    if (zoneless && ZONE_WORD.test(tail.slice(moment[0].length))) return null;
-    const time = momentTime(moment[0]);
-    return Number.isFinite(time) ? Math.max(0, time - now) : null;
-  }
-  // A duration, or a list of durations: the longest.
-  const first = readDuration(tail, 0);
-  if (first) {
-    let longest = first.total;
-    let end = first.end;
-    for (;;) {
-      const joiner = matchAt(JOINER, tail, end);
-      if (!joiner) break;
-      const next = readDuration(tail, end + joiner[0].length);
-      if (!next) break;
-      longest = Math.max(longest, next.total);
-      end = next.end;
-    }
-    return longest;
-  }
-  return readBare(tail, defaultUnit, header, quote);
-}
-
-// Record one stated value: a number is a parsed wait, null an unparsed one (the cap), NO_VALUE nothing.
+// Records one stated wait: a finite number is a parsed wait, null an unreadable one (the cap).
 function record(wait, found) {
-  if (wait === NO_VALUE) return;
-  if (wait === null) found.caps += 1;
+  if (wait === null || Number.isNaN(wait)) found.caps += 1;
   else found.waits.push(wait);
 }
-
-// Every wait stated in a message: one per retry key; an unparsed HEADER key counts as a cap,
-// an unparsed PROSE key as nothing.
-function messageWaits(message, now, found) {
-  for (const key of message.matchAll(KEY)) {
-    const start = key.index + key[0].length;
-    const rest = message.slice(start, start + TAIL_CHARS + 64);
-    const unit = key[1] ? unitMilliseconds(key[1]) : SECOND;
-    const header = HEADER_KEY.test(key[0]) ? HEADER_SEPARATOR.exec(rest) : null;
-    if (header) {
-      record(waitFromTail(rest.slice(header[0].length), now, unit, true), found);
-    } else if (/^[\s:=]/.test(rest)) {
-      const wait = waitFromTail(rest, now, unit);
-      if (typeof wait === "number") found.waits.push(wait);
-    }
-  }
-}
-
-// retry_after, retryAfterSeconds, retry-after-ms, retry_at, retryAtMs ... (any case).
-const STRUCTURED_KEY = /^retry[_-]?(after|at)(?:[_-]?(ms|milliseconds?|secs?|seconds?|mins?|minutes?|hrs?|hours?|s|m|h))?$/i;
 
 // {secs, nanos}, {seconds} or {ms} read as a wait in milliseconds; null for any other shape.
 function objectWait(value) {
@@ -247,33 +102,53 @@ function objectWait(value) {
 }
 
 // Records what a structured key states, if it is a retry key. null or undefined states nothing.
-function structuredWaits(key, value, now, found) {
-  const match = key.match(STRUCTURED_KEY);
+function structuredWait(key, value, now, found) {
+  const match = STRUCTURED_KEY.exec(key);
   if (!match || value === null || value === undefined) return;
   const [, kind, unit] = match;
   const scale = unit ? unitMilliseconds(unit) : null;
+  // retry_at is a moment unless its unit is a duration longer than a second (retry_at_minutes).
   const absolute = kind.toLowerCase() === "at" && (scale === null || scale <= SECOND);
-  if (typeof value === "object") {
-    record(absolute ? null : objectWait(value), found);
-    return;
+  if (typeof value === "object") return record(absolute ? null : objectWait(value), found);
+  if (typeof value === "boolean") return record(null, found);
+  let number = value;
+  if (typeof value === "string") {
+    const text = value.slice(0, STRING_CHARS).trim();
+    if (PLAIN_NUMBER.test(text)) number = Number(text);
+    else {
+      const time = httpDate(text, now);
+      return record(Number.isNaN(time) ? isoDate(text) - now : time - now, found);
+    }
   }
-  if (typeof value === "boolean") { found.caps += 1; return; }
-  const text = typeof value === "string" ? value.slice(0, STRING_CHARS) : null;
-  const numeric = typeof value === "number" ? value
-    : text !== null && /^\s*-?(?:\d+(?:\.\d+)?|\.\d+)\s*$/.test(text) ? Number(text)
-    : null;
-  if (numeric !== null) {
-    if (Number.isNaN(numeric)) { found.caps += 1; return; }
-    if (!absolute) { found.waits.push(numeric * (scale ?? SECOND)); return; }
-    // retry_at: a moment as an epoch count, in the unit the key names, else seconds unless it
-    // is too large to be anything but milliseconds.
-    const epoch = scale !== null ? numeric * scale : numeric > 10_000_000_000 ? numeric : numeric * SECOND;
-    found.waits.push(epoch - now);
-    return;
+  if (typeof number !== "number" || Number.isNaN(number)) return record(null, found);
+  // A moment as an epoch count: seconds, or milliseconds for retry_at_ms.
+  record(absolute ? number * (scale ?? SECOND) - now : number * (scale ?? SECOND), found);
+}
+
+// The wait stated by one Retry-After value from message text: delay-seconds or an HTTP-date.
+// Anything else is null (the cap).
+function headerWait(value, now) {
+  const text = value.trim().replace(/^"(.*)"$/s, "$1");
+  if (DELAY_SECONDS.test(text)) return Number(text) * SECOND;
+  const time = httpDate(text, now);
+  return Number.isNaN(time) ? null : time - now;
+}
+
+// Every Retry-After stated by a header line or JSON header entry in the message.
+function messageWaits(message, now, found) {
+  for (const line of message.split(/\r\n|\n|\r/)) {
+    const text = line.trimStart();
+    if (text.slice(0, 11).toLowerCase() === "retry-after") {
+      const rest = text.slice(11).trimStart();
+      if (rest[0] === ":") {
+        // Anything longer than a date is no date; the cap, not a long read.
+        const value = rest.slice(1).trim();
+        record(value.length > STRING_CHARS ? null : headerWait(value, now), found);
+      }
+    }
+    if (!/retry-after/i.test(line)) continue;
+    for (const entry of line.matchAll(JSON_HEADER)) record(headerWait(entry[1] ?? entry[2], now), found);
   }
-  if (text === null || !text.trim()) return;
-  // A string: a moment, a duration or a bare number, by the same grammar as message text.
-  record(waitFromTail(text, now, scale ?? SECOND, true), found);
 }
 
 // Never negative, never NaN; a count too big to hold is as long as a wait can be.
@@ -289,7 +164,7 @@ export function retryAfterMilliseconds(error, now = Date.now()) {
     if (!value || typeof value !== "object" || depth > MAX_DEPTH || seen.has(value)) return;
     seen.add(value);
     for (const [key, child] of Object.entries(value)) {
-      structuredWaits(key, child, now, found);
+      structuredWait(key, child, now, found);
       walk(child, depth + 1);
     }
   };

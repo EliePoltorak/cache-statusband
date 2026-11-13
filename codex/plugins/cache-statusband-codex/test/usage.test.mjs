@@ -87,7 +87,7 @@ test("honors a Retry-After longer than the five-minute floor", async (t) => {
   assert.equal(second.source, "cache");
   assert.equal(calls, 1);
   assert.equal(retryAfterMilliseconds({ rpcData: { retryAfterMs: 45_000 } }, now), 45_000);
-  assert.equal(retryAfterMilliseconds({ rpcMessage: "limited; retry after 75 seconds" }, now), 75_000);
+  assert.equal(retryAfterMilliseconds({ rpcMessage: "limited\nRetry-After: 75" }, now), 75_000);
 });
 
 test("caps Retry-After at one hour and keeps the last good reading", async (t) => {
@@ -574,65 +574,6 @@ test("a per-call timeout reaches the identity reader and the usage fetcher", asy
   assert.equal(fetchTimeout, 4321);
 });
 
-test("parses retry-after units from error text", () => {
-  const ms = (message) => retryAfterMilliseconds({ message }, 0);
-  assert.equal(ms("limited; retry_after_ms: 500"), 500);
-  assert.equal(ms("retry-after-ms=250"), 250);
-  assert.equal(ms("retry after 5 minutes"), 300_000);
-  assert.equal(ms("retry after 2m"), 120_000);
-  assert.equal(ms("Retry-After: 30"), 30_000);
-  assert.equal(ms("retry after 1500ms"), 1_500);
-  assert.equal(ms("retry after 2 hours"), 7_200_000);
-  assert.equal(ms("no hint here"), null);
-  assert.equal(ms("retry after in 90 seconds"), 90_000);
-});
-
-test("a retry-after date in an error message is a moment; only what directly follows the words is read", () => {
-  const now = Date.parse("2026-10-29T12:00:00.000Z");
-  const ms = (message) => retryAfterMilliseconds({ message }, now);
-  assert.equal(ms("rate limited. Retry after 2026-10-29T12:20:00Z"), 20 * 60_000);
-  assert.equal(ms("Retry-After: 2026-10-29T12:05:30.500Z please"), 5 * 60_000 + 30_500);
-  assert.equal(ms("retry after 2026-10-29T14:00:00+02:00"), 0);
-  // An ISO date is never read as "2026 seconds".
-  assert.notEqual(ms("retry after 2026-10-29T12:20:00Z"), 2026_000);
-  // Words after a prose key are not a wait, nothing is searched for one further on, and a prose
-  // key with no readable wait is no key at all (the caller's own floor).
-  assert.equal(ms("retry after the 5h window (in 40 minutes)"), null);
-  assert.equal(ms("retry after the 5h window"), null);
-  // A date-time with no zone is UTC, whatever zone this machine is in.
-  assert.equal(ms("retry after 2026-10-29T12:20:00"), 20 * 60_000);
-  assert.equal(ms("retry after 2026-10-29 12:20:00"), 20 * 60_000);
-  assert.equal(ms("retry after 2026-10-29T12:20:00.500"), 20 * 60_000 + 500);
-});
-
-test("retry-after wording in an error message: filler words and key suffixes directly after the key", () => {
-  const ms = (message) => retryAfterMilliseconds({ message }, 0);
-  const rows = [
-    ["retry after approximately 30 minutes", 1.8e6],
-    ["please retry after about 20 minutes", 1.2e6],
-    ["retry after at least 10m", 6e5],
-    ["retry after: ~30s", 3e4],
-    ["retry after = 30s", 3e4],
-    // A bare integer may be closed by the quote the prefix opened.
-    ['Retry-After: "30"', 3e4],
-    ['{"retry_after":"120"}', 1.2e5],
-    ['"retry-after": "30"', 3e4],
-    ["Retry-After: '30'", 3e4],
-    ["retry after (30s)", 3e4],
-    ["retry after - 30s", 3e4],
-    ["retry_after_seconds=30", 3e4],
-    ["retry_after_seconds: 30", 3e4],
-    ["retry-after-secs: 3", 3e3],
-    ["retry-after-ms: 250", 250],
-    ["retry after the window resets in 3 hours", null],
-    ["retry after the 5h window (in 40 minutes)", null],
-  ];
-  for (const [message, expected] of rows) assert.equal(ms(message), expected, message);
-  // A prose key with no wait directly after it is no key.
-  assert.equal(ms("retry after the window resets"), null);
-  assert.equal(ms("retry after the 5h window"), null);
-});
-
 test("the missing-home line carries the path with control characters removed", async (t) => {
   const parent = await fixtureRoot(t);
   const here = dirname(fileURLToPath(import.meta.url));
@@ -680,284 +621,236 @@ test("a seat that becomes configured but unreadable during the account read is f
   );
 });
 
-test("retry-after: one strict grammar; a prose key with no readable wait is no key, a header key is the cap", () => {
+test("retry-after in an error message: only HTTP header lines are read, in the RFC 9110 forms", () => {
   const now = Date.parse("2026-11-13T12:00:00.000Z");
   const ms = (message) => retryAfterMilliseconds({ message }, now);
   const rows = [
-    ["retry after 5 more minutes", 3e5],
-    ["retry after 10 more minutes", 6e5],
-    ["retry after 2 days", 1.728e8],
-    ["retry after 1 week", 6.048e8],
-    ["retry after 5 (minutes)", 3e5],
-    ["rate limited; retry after 5-hour window ends in 10m", null],
-    ["retry after 1h30m", 5.4e6],
-    ["retry after 1 hour 30 minutes", 5.4e6],
-    ["retry after 1 hour and 30 minutes", 5.4e6],
-    ["retry after 2 min 30 s", 1.5e5],
-    ["retry after 1,500 ms", 1500],
-    ["retry after .5 s", 500],
-    ["retry after 1.5 hours", 5.4e6],
-    ["retry after the 5h limit resets in 3 hours", null],
-    ["retry after the 5 hour quota resets in 20 minutes", null],
-    // Durations joined by "or", "to", "and", "&", a dash, a comma, spaces or tabs are a list: the longest.
-    ["retry after 30 minutes or 2 hours", 7.2e6],
-    ["retry after 5m-3h", 1.08e7],
-    ["retry after 5m\u20143h", 1.08e7],
-    ["retry after 5m to 3h", 1.08e7],
-    ["retry after 5m, 3h", 1.08e7],
-    ["retry after 3h, 5m", 1.11e7],
-    ["retry after 1m 2h", 7.2e6],
-    ["retry after 1 hour 30 minutes or 2 hours", 7.2e6],
-    ["retry after 2 hours or 30 minutes", 7.2e6],
-    // A list stops at the first item that is not a duration; what follows is not read.
-    ["retry after 30s or in 10 minutes", 3e4],
-    ["retry after 30s, request 41d4", 3e4],
-    // "and" and "&" join a list; the longest item wins.
-    ["retry after 30 minutes and 1 hour", 3.6e6],
-    ["retry after 20 minutes & 1 hour", 3.6e6],
-    ["retry after 2 hours and 30 minutes", 9e6],
-    ["Retry-After: 30 minutes and 1 hour", 3.6e6],
-    // A joiner never reaches across a line break: the next line is not read.
-    ["Retry-After: 30s\n5h limit reached", 3e4],
-    ["retry after 5 minutes\n2 hours later", 3e5],
-    ["retry after 5 minutes\r\n2 hours later", 3e5],
-    ["retry after 1 hour\n30 minutes", 3.6e6],
-    // Two numbers sharing one unit are the larger number with that unit.
-    ["retry after 5-10 minutes", 6e5],
-    ["retry after 5 to 10 minutes", 6e5],
-    ["retry after 5\u201310 min", 6e5],
-    ["Retry-After: 5-10 minutes", 6e5],
-    ["retry after 2-3 hours", 1.08e7],
-    ["retry after 5-10 minutes or 1 hour", 3.6e6],
-    // A decimal number after a HEADER key is seconds; after a prose key it is not a wait.
-    ["Retry-After: 30.5", 30500],
-    ["Retry-After: 0.5", 500],
-    ["retry_after=1,500.25", 1500250],
-    ["retry after 30.5", null],
-    // A time with no zone followed by a space and a word or "(" names a zone we do not read:
-    // unparsed (a header key then gives the cap, a prose key nothing), never UTC.
-    ["Retry-After: 2026-11-13 12:30 EST", MAX_RETRY_AFTER_MS],
-    ["Retry-After: 2026-11-13T12:30:00 America/New_York", MAX_RETRY_AFTER_MS],
-    ["Retry-After: 2026-11-13 12:30 (UTC+2)", MAX_RETRY_AFTER_MS],
+    // delay-seconds on a header line (any case, spaces around the colon, a quoted integer).
+    ["Retry-After: 30", 3e4],
+    ["retry-after: 30", 3e4],
+    ["RETRY-AFTER:30", 3e4],
+    ["  Retry-After :  30  ", 3e4],
+    ['Retry-After: "30"', 3e4],
+    ["Retry-After: 0", 0],
+    // Line ends: LF, CRLF and a lone CR; only the value on the Retry-After line is read.
+    ["Retry-After: 3600\nMS-CV: abc", 3.6e6],
+    ["Retry-After: 30\n-5 minutes", 3e4],
+    ["Retry-After: 30\r\nContent-Length: 0", 3e4],
+    ["HTTP/1.1 429 Too Many Requests\r\nRetry-After: 17\r\n\r\n{}", 1.7e4],
+    ["x\rRetry-After: 45\rY", 4.5e4],
+    ["Retry-After: 2\nRetry-After: 90", 9e4],
+    // Each RFC 9110 HTTP-date form: IMF-fixdate, RFC 850, asctime (also with a one-digit day).
+    ["Retry-After: Fri, 13 Nov 2026 12:30:00 GMT", 1.8e6],
+    ["Retry-After: Friday, 13-Nov-26 12:30:00 GMT", 1.8e6],
+    ["Retry-After: Fri Nov 13 12:30:00 2026", 1.8e6],
+    ["Retry-After: Sun Nov  1 12:30:00 2026", 0],
+    ['Retry-After: "Fri, 13 Nov 2026 12:30:00 GMT"', 1.8e6],
+    // A moment already past is 0, never negative.
+    ["Retry-After: Fri, 13 Nov 2026 11:00:00 GMT", 0],
+    // A JSON header map: "retry-after" with a quoted or bare value, anywhere in a line.
+    ['{"Retry-After":"30","Content-Type":"x"}', 3e4],
+    ['{"retry-after": 45}', 4.5e4],
+    ['{"retry-after":"Fri, 13 Nov 2026 12:30:00 GMT"}', 1.8e6],
+    ['"headers": {\n  "retry-after": "20"\n}', 2e4],
+    // A Retry-After with any other value is the cap: words, units, decimals, negatives, nothing,
+    // an ISO date (not an RFC 9110 form), a range, an unread zone, an impossible date, null.
+    ["Retry-After: soon", MAX_RETRY_AFTER_MS],
+    ["Retry-After: 30 seconds", MAX_RETRY_AFTER_MS],
+    ["Retry-After: 30.5", MAX_RETRY_AFTER_MS],
+    ["Retry-After: -5", MAX_RETRY_AFTER_MS],
+    ["Retry-After:", MAX_RETRY_AFTER_MS],
+    ["Retry-After: 2026-11-13T12:30:00Z", MAX_RETRY_AFTER_MS],
+    ["Retry-After: 5-10 minutes", MAX_RETRY_AFTER_MS],
     ["Retry-After: Fri, 13 Nov 2026 12:30:00 EST", MAX_RETRY_AFTER_MS],
-    ["retry after 2026-11-13 12:30 EST", null],
-    ["retry after 2026-11-13T12:30:00 America/New_York", null],
-    ["retry after 2026-11-13 12:30 (UTC+2)", null],
-    // A zone that is read (or no zone with nothing after) is still a moment.
-    ["retry after 2026-11-13 12:30 UTC", 1.8e6],
-    ["retry after 2026-11-13 12:30:00 +02:00 please", 0],
-    ["retry after 2026-11-13 12:30", 1.8e6],
-    // A bare number is seconds only at the end of the text, a newline, or before . , ; ) ] }
-    // (never before ( ' " or a digit), or before the quote the prefix opened ('"30"'), and a
-    // number is whole except after a HEADER key.
-    ["retry after 90", 9e4],
-    ["retry after 90  ", 9e4],
-    ["retry after 90.", 9e4],
-    ["retry after 90, then wait", 9e4],
-    ["retry after 90; then wait", 9e4],
-    ["(retry after 90)", 9e4],
-    ["[retry after 90]", 9e4],
-    ["{retry after 90}", 9e4],
-    ["retry after 90\nnext line", 9e4],
-    ["retry after 90 \r\nnext line", 9e4],
-    ["Retry-After: 17\nContent-Length: 0", 1.7e4],
-    ["Retry-After: 17\r\nContent-Length: 0", 1.7e4],
-    ["retry after 30 (attempt 3 of 5)", null],
-    ["retry after 10 (about 10 minutes)", null],
-    ["retry after 10 'minutes'", null],
-    ['retry after 10 "minutes"', null],
-    ["retry after 10 more", null],
-    ["retry after 30s (attempt 300)", 3e4],
-    // Clock times, window names, words, a year and a hyphenated noun are not waits: unparsed, and
-    // after a prose key an unparsed value is no key.
-    ["retry after 12:30", null],
-    ["retry after the 5-hour window", null],
-    ["retry after the 5 hour window", null],
-    ["retry after a 2-hour cooldown", null],
-    ["retry after 2-hour cooldown", null],
-    ["retry after Nov 14, 2026", null],
-    ["retry after soon", null],
-    // A unit glued to more letters or digits is not a unit (ids, hashes), and the key still counts.
+    ["Retry-After: Fri, 32 Nov 2026 12:30:00 GMT", MAX_RETRY_AFTER_MS],
+    ['{"retry-after":"soon"}', MAX_RETRY_AFTER_MS],
+    ['{"retry-after":null}', MAX_RETRY_AFTER_MS],
+    // A parsed wait beats a cap.
+    ["Retry-After: soon\nRetry-After: 20", 2e4],
+    // Nothing else is read: no prose, no "retry at", no unit durations, no ranges, no lists, no
+    // retry_after_ms text, and a header that is not at the start of its line.
+    ["retry after 20 minutes", null],
+    ["Retry after 5 minutes", null],
+    ["limited; retry after 75 seconds", null],
+    ["retry after 30s", null],
+    ["retry after 1h30m", null],
+    ["retry after 5-10 minutes", null],
+    ["retry after 30 minutes or 2 hours", null],
+    ["retry at 12:30", null],
+    ["retry after 2026-11-13T12:20:00Z", null],
+    ["retry after the window resets in 3 hours", null],
+    ["retry after reconnecting", null],
+    ["limited; retry_after_ms: 500", null],
+    ["retry-after-ms=250", null],
+    ['{"retry_after":"120"}', null],
+    ["rate limited; Retry-After: 30", null],
+    ["no Retry-After header was sent", null],
+    ["no hint here", null],
+    // Ids, hashes and numbers near the words are nothing.
     ["retry after 7d9f3", null],
     ["retry after 41d4", null],
     ["retry after 8d1e", null],
-    ["retry after 5m10h", null],
-    ["retry after 3 more messages", null],
-    ["retry after 1.5", null],
-    // What follows a complete wait is not read: ids, years, other windows and other counts.
-    ["retry after 20s (request id 7d9f3a-41d4-8d1e-9b2c)", 2e4],
-    ["retry after 20 seconds, request_id req_41d4e8d1e", 2e4],
-    ["retry after 20s; trace 8d1e7d9f3 2026 attempt 5", 2e4],
-    ["retry after 1 minute (id 41d4-8d1e-7d9f3)", 6e4],
-    ["retry after 20 minutes; your 5 hour usage is high", 1.2e6],
-    ["retry after 20 minutes 2026", 1.2e6],
-    // A moment: ISO with a zone, ISO with none and nothing after it but the end or a non-word (UTC),
-    // a zone after a space, an HTTP-date.
-    ["retry after 2026-11-13T12:20:00Z", 1.2e6],
-    ["retry after 2026-11-13T14:20:00+02:00", 1.2e6],
-    ["retry after 2026-11-13 14:20:00 +02:00", 1.2e6],
-    ["retry after 2026-11-13 14:20:00 +0200", 1.2e6],
-    ["retry after 2026-11-13T12:20:00", 1.2e6],
-    ["Retry-After: Fri, 13 Nov 2026 12:30:00 GMT", 1.8e6],
-    ["retry after Fri, 13 Nov 2026 12:30:00", 1.8e6],
-    // A moment already past is 0, never negative.
-    ["retry after 2026-11-13T11:00:00Z", 0],
-    ["Retry-After: Fri, 13 Nov 2026 11:00:00 GMT", 0],
-    // A moment and a count: the longer.
-    ["retry after 2026-11-13T12:05:00Z or in 20 minutes", 3e5],
-    ["retry after 2026-11-13T12:40:00Z or in 20 minutes", 2.4e6],
-    // Several mentions: the longest.
-    ["retry after 30s. Later: retry-after 2 minutes", 1.2e5],
-    ["retry at your convenience", null],
-    ["retry attempt 5 failed", null],
-    // Ordinary prose that happens to contain a key is nothing.
-    ["retry after reconnecting", null],
-    ["retry after sign-in", null],
-    ["retry after the thread is closed", null],
-    ["retry at most 3 times", null],
-    ["will retry at most 3 times", null],
-    ["retry at any time", null],
-    ["retry at a later time", null],
-    ["no Retry-After header was sent", null],
-    ["no retry-after header", null],
-    // "null" and "none" are no key, after either form.
-    ['{"retry_after":null}', null],
-    ["retry_after: null", null],
-    ["Retry-After: none", null],
-    ["retry after none", null],
-    // "retry after:", "retry at:", "retryAt:" and "retry at =" are PROSE keys (a key with a space in it
-    // is not a header): ":" and "=" are only prefix tokens, so an unreadable value is no key.
-    ["Cannot retry after: the thread is closed", null],
-    ["retry at: any time", null],
-    ["retry after: the window resets", null],
-    ["retryAt: later", null],
-    ["retry at = soon", null],
-    ["retryAt: 30", 3e4],
-    ["retry at = 30", 3e4],
-    // After a HEADER key (a spelling with no space in it, then a colon or equals) an unparsed value
-    // is the cap: the server named a Retry-After it did not make readable.
-    ["Retry-After: soon", MAX_RETRY_AFTER_MS],
-    ["retry_after=later", MAX_RETRY_AFTER_MS],
-    ["retry-after-ms: later", MAX_RETRY_AFTER_MS],
-    ['{"retry_after":"soon"}', MAX_RETRY_AFTER_MS],
-    // A date with no time is the end of that day, UTC (the clock here is 12:00Z).
-    ["retry after 2026-11-13", 4.32e7],
-    ["Retry-After: 2026-11-13", 4.32e7],
-    ["retry after 2026-11-12", 0],
+    ["retry after 20s (request id 7d9f3a-41d4-8d1e-9b2c)", null],
+    ["retry after 20 seconds, request_id req_41d4e8d1e", null],
+    ["retry after 20s; trace 8d1e7d9f3 2026 attempt 5", null],
   ];
   for (const [message, expected] of rows) assert.equal(ms(message), expected, message);
-  assert.equal(ms("retry after 9".concat("9".repeat(400))), Number.MAX_SAFE_INTEGER);
+  assert.equal(ms("Retry-After: 9".concat("9".repeat(150))), Number.MAX_SAFE_INTEGER);
+  assert.equal(ms("Retry-After: 9".concat("9".repeat(400))), MAX_RETRY_AFTER_MS);
 });
 
-test("retry-after in structured error data: keys with unit suffixes in any case, and moments as strings", () => {
+test("retry-after in structured error data: every key spelling, numbers, strings, moments and objects", () => {
   const now = Date.parse("2026-11-13T12:00:00.000Z");
   const data = (rpcData) => retryAfterMilliseconds({ rpcData }, now);
+  const epochSeconds = Date.parse("2026-11-13T12:10:00Z") / 1000;
   const rows = [
+    // Key spellings: snake, kebab and camel case, any case, with or without a unit word.
+    [{ retry_after: 900 }, 9e5],
+    [{ "retry-after": 900 }, 9e5],
+    [{ retryAfter: 900 }, 9e5],
+    [{ RetryAfter: 900 }, 9e5],
+    [{ "Retry-After": 900 }, 9e5],
     [{ retry_after_seconds: 1800 }, 1.8e6],
+    [{ "retry-after-seconds": 1800 }, 1.8e6],
     [{ retryAfterSeconds: 1800 }, 1.8e6],
+    [{ RetryAfterSeconds: 1800 }, 1.8e6],
     [{ retry_after_secs: 30 }, 3e4],
+    [{ retry_after_ms: 250 }, 250],
     [{ "retry-after-ms": 250 }, 250],
     [{ retryAfterMs: 45_000 }, 45_000],
+    [{ RETRY_AFTER_MS: 250 }, 250],
+    [{ retry_after_milliseconds: 250 }, 250],
     [{ retry_after_minutes: 5 }, 3e5],
     [{ retryAfterHours: 2 }, 7.2e6],
-    [{ retry_after: 900 }, 9e5],
-    [{ retry_after: "900" }, 9e5],
-    [{ retry_after: "5 minutes" }, 3e5],
-    [{ retry_after: "1h30m" }, 5.4e6],
-    [{ retry_after: "30 minutes and 1 hour" }, 3.6e6],
-    [{ retry_after: "5-10 minutes" }, 6e5],
-    [{ retry_after: "30.5" }, 30500],
-    [{ retry_after: '"30"' }, 3e4],
-    [{ retry_after: "2026-11-13T12:20:00Z" }, 1.2e6],
-    [{ retry_after: "2026-11-13T12:20:00" }, 1.2e6],
-    [{ retry_after: "2026-11-13 14:20:00 +02:00" }, 1.2e6],
-    [{ retryAfter: "Fri, 13 Nov 2026 12:30:00 GMT" }, 1.8e6],
-    [{ retry_at: "2026-11-13T12:20:00Z" }, 1.2e6],
-    [{ retry_at: Date.parse("2026-11-13T12:10:00Z") / 1000 }, 6e5],
-    [{ retry_at: Date.parse("2026-11-13T12:10:00Z") }, 6e5],
-    [{ retry_at_ms: Date.parse("2026-11-13T12:10:00Z") }, 6e5],
-    [{ retry_after: -5 }, 0],
     [{ error: { details: [{ retryAfterSeconds: 120 }] } }, 1.2e5],
+    // A key that merely contains the words, or has an unknown suffix, is not a retry key.
+    [{ x_retry_after: 5 }, null],
+    [{ retry_after_foo: 5 }, null],
+    [{ retries_after: 5 }, null],
+    [{ unrelated: 5 }, null],
+    // retry_at: a moment as an epoch count (seconds; milliseconds for the Ms suffix).
+    [{ retry_at: epochSeconds }, 6e5],
+    [{ retry_at_seconds: epochSeconds }, 6e5],
+    [{ retryAtSeconds: epochSeconds }, 6e5],
+    [{ retry_at_ms: epochSeconds * 1000 }, 6e5],
+    [{ retryAtMs: epochSeconds * 1000 }, 6e5],
+    [{ retry_at: String(epochSeconds) }, 6e5],
+    [{ retry_at_minutes: 5 }, 3e5],
+    // A negative number is 0, never a negative wait.
+    [{ retry_after: -5 }, 0],
+    // Strings: a plain non-negative integer or decimal (scaled by the key's unit).
+    [{ retry_after: "900" }, 9e5],
+    [{ retry_after: "30.5" }, 30500],
+    [{ retry_after_ms: "250" }, 250],
+    // Strings: an HTTP-date, in each of the three RFC 9110 forms.
+    [{ retryAfter: "Fri, 13 Nov 2026 12:30:00 GMT" }, 1.8e6],
+    [{ retryAfter: "Friday, 13-Nov-26 12:30:00 GMT" }, 1.8e6],
+    [{ retryAfter: "Fri Nov 13 12:30:00 2026" }, 1.8e6],
+    // Strings: ISO 8601 with a zone (Z, +hh, +hhmm, +hh:mm, a negative zone), or no zone (UTC).
+    [{ retry_after: "2026-11-13T12:20:00Z" }, 1.2e6],
+    [{ retry_after: "2026-11-13T14:20:00+02:00" }, 1.2e6],
+    [{ retry_after: "2026-11-13T14:20:00+0200" }, 1.2e6],
+    [{ retry_after: "2026-11-13T14:20:00+02" }, 1.2e6],
+    [{ retry_after: "2026-11-13T07:20:00-05:00" }, 1.2e6],
+    [{ retry_after: "2026-11-13T12:20:00" }, 1.2e6],
+    [{ retry_after: "2026-11-13 12:20:00" }, 1.2e6],
+    [{ retry_after: "2026-11-13T12:00:30.500Z" }, 30500],
+    [{ retry_at: "2026-11-13T12:20:00Z" }, 1.2e6],
+    [{ retry_after: "2026-11-13T11:00:00Z" }, 0],
     // Two keys: the longer.
     [{ retry_after: 60, retryAfterSeconds: 600 }, 6e5],
-    [{ retry_after: "" }, null],
+    // null states nothing.
     [{ retry_after: null }, null],
-    [{ unrelated: 5 }, null],
     // An object value: {secs, nanos}, {seconds} or {ms}.
     [{ retry_after: { secs: 30, nanos: 0 } }, 3e4],
     [{ retry_after: { secs: 1, nanos: 500_000_000 } }, 1500],
     [{ retry_after: { seconds: 45 } }, 4.5e4],
     [{ retry_after: { ms: 250 } }, 250],
-    // Any other object, an array or a boolean is a retry key whose value is unreadable: the cap.
+    // Anything else that is named but not readable is the cap: another object, an array, a
+    // boolean, a string that is not one of the forms above (durations, ranges, quoted numbers,
+    // negatives, a date with no time, an unread zone, a space before the zone, "null", "").
     [{ retry_after: {} }, MAX_RETRY_AFTER_MS],
     [{ retry_after: { when: "soon" } }, MAX_RETRY_AFTER_MS],
     [{ retry_after: { secs: "30" } }, MAX_RETRY_AFTER_MS],
+    [{ retry_at: { secs: 30 } }, MAX_RETRY_AFTER_MS],
     [{ retry_after: [30] }, MAX_RETRY_AFTER_MS],
     [{ retry_after: true }, MAX_RETRY_AFTER_MS],
     [{ retry_after: false }, MAX_RETRY_AFTER_MS],
-    // null states nothing, and so do "null" and "none".
-    [{ retry_after: "null" }, null],
-    [{ retry_after: "none" }, null],
-    // A date with no time is the end of that day, UTC.
-    [{ retry_after: "2026-11-13" }, 4.32e7],
+    [{ retry_after: "soon" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "5 minutes" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "1h30m" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "5-10 minutes" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: '"30"' }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "-5" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "2026-11-13" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "2026-11-13 12:30 EST" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "2026-11-13T14:20:00 +02:00" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "2026-13-45T25:61:00Z" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "20s (request 41d4)" }, MAX_RETRY_AFTER_MS],
+    [{ retryAfter: "a 2-hour cooldown" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "null" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "" }, MAX_RETRY_AFTER_MS],
   ];
   for (const [rpcData, expected] of rows) assert.equal(data(rpcData), expected, JSON.stringify(rpcData));
   // Data and message together: the longer.
-  assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: 60 }, message: "retry after 10 minutes" }, now), 6e5);
-  // Structured data: a parsed number or string always wins over a cap from the message text, and
-  // the message cap answers only when nothing parsed at all.
+  assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: 60 }, message: "Retry-After: 600" }, now), 6e5);
+  // A parsed wait always wins over a cap from the other side; a cap answers only when nothing parsed.
   assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: 30 }, message: "Retry-After: soon" }, now), 3e4);
-  assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: 30 }, message: "rate limited. Retry-After: later, retry after the window" }, now), 3e4);
   assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: { secs: 30, nanos: 0 } }, message: "Retry-After: soon" }, now), 3e4);
-  assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: [30] }, message: "retry after 10 minutes" }, now), 6e5);
-  assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: "soon" }, message: "retry after 10 minutes" }, now), 6e5);
+  assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: [30] }, message: "Retry-After: 600" }, now), 6e5);
+  assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: "soon" }, message: "Retry-After: 600" }, now), 6e5);
   assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: [30] }, message: "Retry-After: soon" }, now), MAX_RETRY_AFTER_MS);
   assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: null }, message: "Retry-After: soon" }, now), MAX_RETRY_AFTER_MS);
+  assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: [30] }, message: "retry after 10 minutes" }, now), MAX_RETRY_AFTER_MS);
   assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: null }, message: "no Retry-After header was sent" }, now), null);
-  // A retry key whose string value is not a wait is the cap, as after a header key in text.
-  assert.equal(data({ retry_after: "soon" }), MAX_RETRY_AFTER_MS);
-  assert.equal(data({ retryAfter: "a 2-hour cooldown" }), MAX_RETRY_AFTER_MS);
-  assert.equal(data({ retry_after: "7d9f3" }), MAX_RETRY_AFTER_MS);
-  assert.equal(data({ retry_after: "2026-11-13 12:30 EST" }), MAX_RETRY_AFTER_MS);
-  assert.equal(data({ retry_after: "20s (request 41d4)" }), 2e4);
-  // Depth is limited, a cycle ends, and a long string is cut.
+  assert.equal(retryAfterMilliseconds({ rpcData: { unrelated: 1 }, message: "retry after 10 minutes" }, now), null);
+  // Depth is limited, a cycle ends, and a long string is cut (so it cannot parse).
   let deep = { retry_after: 9999 };
   for (let i = 0; i < 12; i += 1) deep = { nested: deep };
   assert.equal(data(deep), null);
   const loop = { retry_after: 30 };
   loop.self = loop;
   assert.equal(data(loop), 3e4);
-  assert.equal(data({ retry_after: `${"x".repeat(300)} 20s` }), MAX_RETRY_AFTER_MS);
+  assert.equal(data({ retry_after: `${"x".repeat(300)} 20` }), MAX_RETRY_AFTER_MS);
+  assert.equal(data({ retry_after: `20${" ".repeat(300)}` }), 2e4);
 });
 
 test("retry-after: hostile messages finish quickly and never throw", () => {
   const started = Date.now();
-  // Prose keys with nothing readable after them are no key; header keys are the cap.
   assert.equal(retryAfterMilliseconds({ message: "retry after ".repeat(300_000) }, 0), null);
   assert.equal(retryAfterMilliseconds({ message: "Retry-After: ".repeat(300_000) }, 0), MAX_RETRY_AFTER_MS);
-  assert.equal(retryAfterMilliseconds({ message: `retry after ${"Mon".repeat(30_000)}` }, 0), null);
-  assert.equal(retryAfterMilliseconds({ message: "retry after ".repeat(30_000) + "Mon ".repeat(30_000) }, 0), null);
   assert.equal(retryAfterMilliseconds({ message: `retry after${" ".repeat(300_000)}5` }, 0), null);
-  assert.equal(retryAfterMilliseconds({ message: `Retry-After:${" ".repeat(300_000)}5` }, 0), MAX_RETRY_AFTER_MS);
-  assert.equal(retryAfterMilliseconds({ message: `retry after ${"1,".repeat(100_000)}` }, 0), null);
-  assert.equal(retryAfterMilliseconds({ message: `retry after ${"5m-".repeat(100_000)}` }, 0), 300_000);
-  assert.equal(retryAfterMilliseconds({ message: `retry after ${"1m ".repeat(100_000)}` }, 0), 60_000 * 1);
-  assert.equal(retryAfterMilliseconds({ message: `retry after ${"1m and ".repeat(100_000)}` }, 0), 60_000);
-  assert.equal(retryAfterMilliseconds({ message: `retry after ${"5-10 min, ".repeat(100_000)}` }, 0), 600_000);
+  assert.equal(retryAfterMilliseconds({ message: `Retry-After:${" ".repeat(300_000)}5` }, 0), 5000);
+  assert.equal(retryAfterMilliseconds({ message: `Retry-After: 5${" ".repeat(300_000)}x` }, 0), MAX_RETRY_AFTER_MS);
+  assert.equal(retryAfterMilliseconds({ message: "\n".repeat(1_000_000) }, 0), null);
+  assert.equal(retryAfterMilliseconds({ message: "Retry-After: 5\n".repeat(100_000) }, 0), 5000);
+  assert.equal(retryAfterMilliseconds({ message: '"retry-after":"'.repeat(100_000) }, 0), MAX_RETRY_AFTER_MS);
+  assert.equal(retryAfterMilliseconds({ message: `"retry-after": ${"a".repeat(1_000_000)}` }, 0), MAX_RETRY_AFTER_MS);
+  assert.equal(retryAfterMilliseconds({ message: `"retry-after":"${"a".repeat(1_000_000)}` }, 0), MAX_RETRY_AFTER_MS);
   assert.equal(retryAfterMilliseconds({ message: `Retry-After: ${'"'.repeat(100_000)}5` }, 0), MAX_RETRY_AFTER_MS);
+  assert.equal(retryAfterMilliseconds({ message: `retry after ${"Mon".repeat(30_000)}` }, 0), null);
+  assert.equal(retryAfterMilliseconds({ message: `Retry-After: ${"Mon, 01 ".repeat(30_000)}` }, 0), MAX_RETRY_AFTER_MS);
   assert.ok(Date.now() - started < 3000, `took ${Date.now() - started} ms`);
 });
 
-test("a message-stated wait of hours is capped at one hour by the caller", async (t) => {
+test("a Retry-After header line of hours is capped at one hour by the caller, and a wait stated only in prose is not read", async (t) => {
   const root = await fixtureRoot(t);
   const now = Date.parse("2026-10-29T12:00:00.000Z");
   const failed = await getUsageSnapshot({
     codexHome: root,
     now,
     identity: ACCOUNT_IDENTITY,
-    fetcher: async () => { throw new Error("limited; retry after 3 hours"); },
+    fetcher: async () => { throw new Error("limited\nRetry-After: 10800"); },
   });
   assert.equal(failed.nextAllowedAt, now + MAX_RETRY_AFTER_MS);
+  // The same wait stated only in prose is not read: the normal five-minute floor applies.
+  const prose = await getUsageSnapshot({
+    codexHome: await fixtureRoot(t),
+    now,
+    identity: ACCOUNT_IDENTITY,
+    fetcher: async () => { throw new Error("limited; retry after 3 hours"); },
+  });
+  assert.equal(prose.nextAllowedAt, now + MIN_POLL_INTERVAL_MS);
 });
 
 test("a cache deadline beyond the longest possible backoff does not suppress polling", async (t) => {
