@@ -686,9 +686,9 @@ exit /b 0
   # and config.toml keeps its update (nothing is rolled back).
   $npmBin = Join-Path $testHome "npm-bin"
   New-Item -ItemType Directory -Path $npmBin | Out-Null
-  # npm root -g carries the same current-folder guard as the Codex calls (npm.cmd runs a bare node).
+  # npm root -g and npm link carry the same current-folder guard as the Codex calls (npm.cmd runs a bare node).
   $npmGuardLog = Join-Path $testHome "npm-guard-log.txt"
-  [IO.File]::WriteAllText((Join-Path $npmBin "npm.cmd"), "@echo off`r`nif `"%1`"==`"root`" (`r`n  echo [%NoDefaultCurrentDirectoryInExePath%]>> `"$npmGuardLog`"`r`n  echo %~dp0no-global-root`r`n  exit /b 0`r`n)`r`nexit /b 1`r`n", [Text.Encoding]::ASCII)
+  [IO.File]::WriteAllText((Join-Path $npmBin "npm.cmd"), "@echo off`r`nif `"%1`"==`"root`" (`r`n  echo [%NoDefaultCurrentDirectoryInExePath%]>> `"$npmGuardLog`"`r`n  echo %~dp0no-global-root`r`n  exit /b 0`r`n)`r`necho [%NoDefaultCurrentDirectoryInExePath%]>> `"$npmGuardLog`"`r`nexit /b 1`r`n", [Text.Encoding]::ASCII)
   $npmHome = Join-Path $testHome "npm-home"
   $npmMessage = ""
   $previousPath = $env:PATH
@@ -706,9 +706,9 @@ exit /b 0
   }
   $npmGuardAfter = $env:NoDefaultCurrentDirectoryInExePath
   $env:NoDefaultCurrentDirectoryInExePath = $previousGuard
-  if ($npmGuardAfter -ne "caller-value") { throw "The installer did not put back the caller's NoDefaultCurrentDirectoryInExePath after npm root -g: '$npmGuardAfter'" }
+  if ($npmGuardAfter -ne "caller-value") { throw "The installer did not put back the caller's NoDefaultCurrentDirectoryInExePath after the npm calls: '$npmGuardAfter'" }
   $npmGuardLines = @(Get-Content -LiteralPath $npmGuardLog)
-  if ($npmGuardLines.Count -lt 1 -or @($npmGuardLines | Where-Object { $_.Trim() -ne "[1]" }).Count -ne 0) { throw "npm root -g ran without NoDefaultCurrentDirectoryInExePath=1: $($npmGuardLines -join ', ')" }
+  if ($npmGuardLines.Count -lt 2 -or @($npmGuardLines | Where-Object { $_.Trim() -ne "[1]" }).Count -ne 0) { throw "An npm call ran without NoDefaultCurrentDirectoryInExePath=1: $($npmGuardLines -join ', ')" }
   if ($npmMessage -notmatch "npm link failed" -or $npmMessage -notmatch "plugin is already installed" -or $npmMessage -notmatch "only the terminal command link was not made") { throw "A failed npm link was not described as only the link step failing: $npmMessage" }
   if ($npmMessage -match "settings.json") { throw "The npm link message mentioned settings.json although -SeatFile was not used: $npmMessage" }
   $npmConfig = [IO.File]::ReadAllText((Join-Path $npmHome "config.toml"))

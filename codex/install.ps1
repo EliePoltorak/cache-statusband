@@ -746,9 +746,12 @@ if (-not $SkipCliLink) {
   } else {
     $linkExit = $null
     $pushedLocation = $false
+    $previousNoCurrentFolder = $env:NoDefaultCurrentDirectoryInExePath
     try {
       Push-Location -LiteralPath $pluginRoot
       $pushedLocation = $true
+      # npm.cmd runs a bare "node"; never take it from the current PowerShell location.
+      $env:NoDefaultCurrentDirectoryInExePath = "1"
       & npm link
       $linkExit = $LASTEXITCODE
     } catch {
@@ -760,6 +763,7 @@ if (-not $SkipCliLink) {
       }
       throw (& $linkFailure "npm link failed ($($_.Exception.Message))")
     } finally {
+      $env:NoDefaultCurrentDirectoryInExePath = $previousNoCurrentFolder
       if ($pushedLocation) { Pop-Location }
     }
     if ($linkExit -ne 0) { throw (& $linkFailure "npm link failed ($linkExit)") }
