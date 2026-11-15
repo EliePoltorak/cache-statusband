@@ -398,7 +398,9 @@ test("resolves a runnable Codex command from CODEX_BIN or the Windows PATH", { s
   assert.equal(resolveCodexLaunch({ PATH: bin, ComSpec: "cmd.exe" }, "win32").command, "C:\\Windows\\System32\\cmd.exe");
   assert.equal(windowsSystemExe("taskkill.exe", { systemroot: "E:\\W" }), "E:\\W\\System32\\taskkill.exe");
   // A CODEX_BIN that is neither a full path nor a bare name would resolve against the current
-  // folder (the open project, for the hooks), so it is refused; a UNC folder cannot be cmd.exe's.
+  // folder (the open project, for the hooks), so it is refused. Quotes around a full path are not
+  // part of it.
+  assert.equal(resolveCodexLaunch({ CODEX_BIN: ' "C:\\Program Files\\Codex\\codex.exe" ' }, "win32").command, "C:\\Program Files\\Codex\\codex.exe");
   for (const relativeBin of ["tools\\codex.cmd", ".\\codex.exe", "./codex.exe", "C:codex.exe", "\\codex.exe"]) {
     assert.throws(() => resolveCodexLaunch({ CODEX_BIN: relativeBin, PATH: other }, "win32"), /not a full path/, relativeBin);
   }
@@ -406,6 +408,7 @@ test("resolves a runnable Codex command from CODEX_BIN or the Windows PATH", { s
   assert.equal(resolveCodexLaunch({ CODEX_BIN: "codex.exe", PATH: `${other}${delimiter}.` }, "win32").command, join(other, "codex.exe"));
   assert.equal(resolveCodexLaunch({ CODEX_BIN: "codex", PATH: other }, "win32").command, join(other, "codex.exe"));
   assert.throws(() => resolveCodexLaunch({ CODEX_BIN: "codex.exe", PATH: "." }, "win32"), (error) => error.code === "ENOENT" && /CODEX_BIN names codex\.exe/.test(error.message));
+  // cmd.exe cannot run from a UNC folder, so a shared codex.cmd gets no folder, only the guard.
   const shared = resolveCodexLaunch({ CODEX_BIN: "\\\\server\\share\\codex.cmd" }, "win32");
   assert.equal(shared.cwd, undefined);
   assert.equal(shared.guardCurrentFolder, true);

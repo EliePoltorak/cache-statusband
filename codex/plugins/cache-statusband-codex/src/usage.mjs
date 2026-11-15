@@ -268,8 +268,9 @@ export function codexHomeIsMissing(home, stat = statSync) {
 // Windows looks in the current folder before PATH, so it would run a codex.exe planted in
 // whatever project or folder the command was started from.
 export function resolveCodexLaunch(env = process.env, platform = process.platform, args = ["app-server"]) {
-  const configured = env.CODEX_BIN || null;
   const windows = platform === "win32";
+  // Windows users often keep the quotes around a path with spaces; strip them as PATH entries are.
+  const configured = (windows ? String(env.CODEX_BIN || "").trim().replace(/^"|"$/g, "") : env.CODEX_BIN) || null;
   let target = configured;
   // A CODEX_BIN with no folder in it ("codex.exe", "codex") is a name to look up on PATH, the way
   // it always was, but only in full-path PATH entries: never the current folder.
@@ -299,6 +300,7 @@ export function resolveCodexLaunch(env = process.env, platform = process.platfor
     if (target.includes("%")) {
       throw new Error(`Cannot launch ${target}: cmd.exe cannot safely run a path containing "%". Set CODEX_BIN to codex.exe or move the Codex install.`);
     }
+    // Normalised to backslashes; the folder cmd.exe runs from is taken from it below.
     const wrapper = win32.resolve(target);
     const line = [`"${wrapper}"`, ...args].join(" ");
     // cmd.exe cannot run from a UNC folder; there the env guard set by the caller is the only one.
