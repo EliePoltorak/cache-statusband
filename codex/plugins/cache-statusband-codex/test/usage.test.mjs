@@ -364,7 +364,15 @@ test("uses an explicitly configured seat file before the account email", async (
 
 const FAKE_SERVER = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "fake-app-server.mjs");
 
-test("resolves a runnable Codex command from CODEX_BIN or the Windows PATH", async (t) => {
+// The Windows lookup checks Windows paths, which a POSIX temp folder is not, so those tests run
+// on Windows only; this one covers the launch everywhere else.
+test("off Windows, Codex is launched from CODEX_BIN or by name", () => {
+  assert.deepEqual(resolveCodexLaunch({ CODEX_BIN: "/opt/codex" }, "linux"), { command: "/opt/codex", args: ["app-server"] });
+  assert.deepEqual(resolveCodexLaunch({ PATH: "/usr/bin" }, "linux"), { command: "codex", args: ["app-server"] });
+  assert.equal(resolveCodexLaunch({ CODEX_BIN: "/opt/100%/codex" }, "darwin").command, "/opt/100%/codex");
+});
+
+test("resolves a runnable Codex command from CODEX_BIN or the Windows PATH", { skip: process.platform !== "win32" }, async (t) => {
   const root = await fixtureRoot(t);
   const bin = join(root, "npm bin");
   const other = join(root, "other");
@@ -419,12 +427,12 @@ test("resolves a runnable Codex command from CODEX_BIN or the Windows PATH", asy
   assert.throws(() => resolveCodexLaunch({ PATH: join(root, "empty") }, "win32"), (error) => error.code === "ENOENT" && /not found on PATH/.test(error.message));
 });
 
-test("a codex.cmd whose path contains % is refused rather than expanded by cmd.exe", async (t) => {
+test("a codex.cmd whose path contains % is refused rather than expanded by cmd.exe", { skip: process.platform !== "win32" }, async (t) => {
   const root = await fixtureRoot(t);
   const bin = join(root, "100%PATH%");
   await mkdir(bin);
   await writeFile(join(bin, "codex.cmd"), "");
-  assert.throws(() => resolveCodexLaunch({ Path: bin }, "win32"), /CODEX_BIN.*codex\.exe/);
+  assert.throws(() => resolveCodexLaunch({ Path: bin }, "win32"), /cannot safely run a path containing "%"/);
   assert.throws(() => resolveCodexLaunch({ CODEX_BIN: join(bin, "codex.cmd") }, "win32"), /%/);
   // Only the cmd.exe wrapper has the problem: an .exe or a non-Windows path is fine.
   assert.equal(resolveCodexLaunch({ CODEX_BIN: join(bin, "codex.exe") }, "win32").command, join(bin, "codex.exe"));
@@ -1000,7 +1008,7 @@ test("a cache-only snapshot reports what is stored and records no attempt", asyn
   assert.deepEqual((await readdir(dataDir)).sort(), [name]);
 });
 
-test("a % codex.cmd earlier on PATH is skipped when a usable codex.exe comes later", async (t) => {
+test("a % codex.cmd earlier on PATH is skipped when a usable codex.exe comes later", { skip: process.platform !== "win32" }, async (t) => {
   const root = await fixtureRoot(t);
   const bad = join(root, "100%PATH%");
   const good = join(root, "good");
@@ -1010,7 +1018,7 @@ test("a % codex.cmd earlier on PATH is skipped when a usable codex.exe comes lat
   await writeFile(join(good, "codex.exe"), "");
   assert.equal(resolveCodexLaunch({ PATH: `${bad}${delimiter}${good}` }, "win32").command, join(good, "codex.exe"));
   // Nothing usable anywhere: the refusal still names the problem.
-  assert.throws(() => resolveCodexLaunch({ PATH: bad }, "win32"), /CODEX_BIN.*codex\.exe/);
+  assert.throws(() => resolveCodexLaunch({ PATH: bad }, "win32"), /cannot safely run a path containing "%"/);
   // A % in the directory only matters to the cmd.exe wrapper.
   await writeFile(join(bad, "codex.exe"), "");
   assert.equal(resolveCodexLaunch({ PATH: bad }, "win32").command, join(bad, "codex.exe"));
