@@ -33,6 +33,8 @@ export async function getUsageSnapshot({
   lockOpenImpl,
 } = {}) {
   if (!codexHome) throw new Error("codexHome is required");
+  // Measures time since `now`, so a failure's backoff can count from when it arrived.
+  const calledAt = performance.now();
   const dataDir = join(codexHome, "cache-statusband-codex");
   const identity = suppliedIdentity === undefined
     ? await captureUsageIdentity(codexHome, { env })
@@ -121,9 +123,6 @@ export async function getUsageSnapshot({
     }
 
     let saved;
-    // A relative Retry-After counts from when the failure arrived, not from before the read:
-    // the read's own start-up and response time must not be deducted from the server's wait.
-    const readStarted = performance.now();
     try {
       // The fetcher is told whose usage is wanted so it can check the login first and
       // send no rate-limit request for any other account (see fetchRateLimitsViaAppServer).
@@ -139,7 +138,9 @@ export async function getUsageSnapshot({
         nextAllowedAt: now + MIN_POLL_INTERVAL_MS,
       };
     } catch (error) {
-      const failedAt = now + Math.max(0, Math.ceil(performance.now() - readStarted));
+      // A relative Retry-After counts from when the failure arrived: nothing since `now` (lock
+      // wait, attempt marker, the read's start-up and response) is deducted from the wait.
+      const failedAt = now + Math.max(0, Math.ceil(performance.now() - calledAt));
       const retryMs = retryAfterMilliseconds(error, failedAt);
       const failed = {
         ...attempted,

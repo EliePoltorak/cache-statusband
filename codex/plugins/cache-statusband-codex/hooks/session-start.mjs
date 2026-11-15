@@ -72,7 +72,10 @@ export async function handleSessionStart(input, {
       const remaining = deadlineMs - (Date.now() - started);
       const cacheOnly = remaining < MIN_FETCH_BUDGET_MS + READ_MARGIN_MS;
       const timeoutMs = Math.max(READ_MARGIN_MS, remaining - READ_MARGIN_MS);
-      const usage = await usageGetter({ codexHome: home, now, identity, timeoutMs, ...(cacheOnly ? { cacheOnly: true } : {}) });
+      // The usage read's clock starts now, not when the hook began: the identity read above
+      // must not be deducted from a relative Retry-After the usage read may record.
+      const usageNow = now + Math.max(0, Date.now() - started);
+      const usage = await usageGetter({ codexHome: home, now: usageNow, identity, timeoutMs, ...(cacheOnly ? { cacheOnly: true } : {}) });
       const presented = await usagePresentation(usage, { codexHome: home, identity, current: source !== "resume" });
       const built = [];
       // A resumed session's identity is the one it STARTED under, which may no longer be the

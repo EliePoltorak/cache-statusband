@@ -1395,3 +1395,28 @@ test("a configured seat that cannot be read keeps usage and board silent on stde
     assert.equal(stderr, "", `${args.join(" ")}: ${stderr}`);
   }
 });
+
+test("SessionStart: the identity read's time is not deducted from the usage read's clock", async (t) => {
+  const root = await fixtureRoot(t);
+  const path = join(root, "rollout.jsonl");
+  await writeFixture(path);
+  const email = ["person", "example.invalid"].join("@");
+  const now = Date.parse("2026-10-29T12:04:00.000Z");
+  let usageNow = null;
+  await handleSessionStart(
+    { source: "startup", session_id: "session-clock", transcript_path: path },
+    {
+      codexHome: root,
+      now,
+      identityGetter: async () => {
+        await new Promise((done) => setTimeout(done, 400));
+        return { key: `account:${email}`, label: email, unavailable: false };
+      },
+      usageGetter: async (options) => {
+        usageNow = options.now;
+        return { identityKey: `account:${email}`, accountEmail: email, availableCount: 2, credits: [], fetchedAt: options.now, source: "live" };
+      },
+    },
+  );
+  assert.ok(usageNow >= now + 350, `the usage read was given a clock only ${usageNow - now} ms past the hook's start`);
+});

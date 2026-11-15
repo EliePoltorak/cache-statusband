@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { access, copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, relative, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -74,8 +74,8 @@ test("shares one rate-limit read for at least five minutes", async (t) => {
 
 // A failed read's backoff starts when the failure arrives, so it runs a little past the
 // injected `now` by however long the (fake) read took.
-function assertDeadline(actual, expected) {
-  assert.ok(actual >= expected && actual < expected + 1_000, `deadline ${actual} is not just after ${expected}`);
+function assertDeadline(actual, expected, tolerance = 1_000) {
+  assert.ok(actual >= expected && actual < expected + tolerance, `deadline ${actual} is not just after ${expected}`);
 }
 
 test("honors a Retry-After longer than the five-minute floor", async (t) => {
@@ -977,7 +977,8 @@ test("a different login is detected before any rate-limit request is made", asyn
   assert.deepEqual(await requests(), ["initialize", "initialized", "account/read"]);
   // Nothing was stored for B, and A is backed off for the usual interval.
   assert.equal((await readdir(join(root, "cache-statusband-codex"))).filter((name) => name.endsWith(".json")).length, 1);
-  assertDeadline(mismatched.nextAllowedAt, now + MIN_POLL_INTERVAL_MS);
+  // This read starts a real child process, which can take seconds on a loaded machine.
+  assertDeadline(mismatched.nextAllowedAt, now + MIN_POLL_INTERVAL_MS, 10_000);
 
   // The same login, spelled in a different case, is the same account.
   await rm(log);
@@ -1443,4 +1444,17 @@ test("a relative Retry-After counts from when the failure arrived, not from befo
   // The read took ~400 ms, so the 600 s wait must end at least that much after `now + 600 s`.
   assert.ok(failed.nextAllowedAt >= now + 600_000 + 350, `nextAllowedAt is only ${failed.nextAllowedAt - now} ms after the read began`);
   assert.ok(failed.lastErrorAt >= now + 350);
+});
+
+test("time spent before the read (a slow attempt-marker write) is not deducted from a Retry-After", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  let slowed = false;
+  const renameImpl = async (from, to) => {
+    if (!slowed) { slowed = true; await new Promise((done) => setTimeout(done, 400)); }
+    return rename(from, to);
+  };
+  const fetcher = async () => { throw Object.assign(new Error("limited"), { rpcData: { retry_after: 600 } }); };
+  const failed = await getUsageSnapshot({ codexHome: root, now, fetcher, identity: ACCOUNT_IDENTITY, renameImpl });
+  assert.ok(failed.nextAllowedAt >= now + 600_000 + 350, `nextAllowedAt is only ${failed.nextAllowedAt - now} ms after the call began`);
 });
