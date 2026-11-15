@@ -403,7 +403,9 @@ test("resolves a runnable Codex command from CODEX_BIN or the Windows PATH", asy
   if (process.platform === "win32") {
     assert.throws(() => resolveCodexLaunch({ PATH: relative(process.cwd(), other) }, "win32"), (error) => error.code === "ENOENT");
   }
-  assert.deepEqual(resolveCodexLaunch({ PATH: `${other}${delimiter}${bin}` }, "win32"), { command: join(other, "codex.exe"), args: ["app-server"] });
+  // An .exe also runs from its own folder with the current-folder guard (it may be a launcher
+  // that starts a bare "node", as Bun's is).
+  assert.deepEqual(resolveCodexLaunch({ PATH: `${other}${delimiter}${bin}` }, "win32"), { command: join(other, "codex.exe"), args: ["app-server"], cwd: other, guardCurrentFolder: true });
   assert.equal(resolveCodexLaunch({ PATH: other, CODEX_BIN: join(bin, "codex.cmd"), ComSpec }, "win32").windowsVerbatimArguments, true);
   assert.deepEqual(resolveCodexLaunch({ CODEX_BIN: "/opt/codex" }, "linux"), { command: "/opt/codex", args: ["app-server"] });
   assert.deepEqual(resolveCodexLaunch({ PATH: bin }, "linux"), { command: "codex", args: ["app-server"] });
@@ -1000,7 +1002,7 @@ test("a % codex.cmd earlier on PATH is skipped when a usable codex.exe comes lat
   await mkdir(good);
   await writeFile(join(bad, "codex.cmd"), "");
   await writeFile(join(good, "codex.exe"), "");
-  assert.deepEqual(resolveCodexLaunch({ PATH: `${bad}${delimiter}${good}` }, "win32"), { command: join(good, "codex.exe"), args: ["app-server"] });
+  assert.equal(resolveCodexLaunch({ PATH: `${bad}${delimiter}${good}` }, "win32").command, join(good, "codex.exe"));
   // Nothing usable anywhere: the refusal still names the problem.
   assert.throws(() => resolveCodexLaunch({ PATH: bad }, "win32"), /CODEX_BIN.*codex\.exe/);
   // A % in the directory only matters to the cmd.exe wrapper.
@@ -1222,4 +1224,17 @@ test("an npm codex.cmd never runs a node.exe planted in the caller's folder", { 
   const { stdout } = await promisify(execFile)(process.execPath, [script], { cwd: project, env, windowsHide: true, timeout: 20_000 });
   const ranWith = await readFile(marker, "utf8").catch(() => assert.fail(`the server never ran: ${stdout}`));
   assert.notEqual(ranWith.toLowerCase(), planted.toLowerCase(), "the planted node.exe in the caller's folder ran");
+});
+
+test("a stored cacheUnwritable or cacheDir is never shown as this call's state", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const dataDir = join(root, "cache-statusband-codex");
+  const name = `rate-limits-${createHash("sha256").update(ACCOUNT_IDENTITY.key).digest("hex").slice(0, 16)}.json`;
+  await mkdir(dataDir);
+  await writeFile(join(dataDir, name), JSON.stringify({ version: 3, identityKey: ACCOUNT_IDENTITY.key, accountEmail: TEST_EMAIL, availableCount: 4, fetchedAt: now - 1000, nextAllowedAt: now + 60_000, lastErrorAt: null, cacheUnwritable: true, cacheDir: "C:\elsewhere" }));
+  const snapshot = await getUsageSnapshot({ codexHome: root, now, identity: ACCOUNT_IDENTITY, fetcher: async () => { throw new Error("must not read"); }, cacheOnly: true });
+  assert.equal(snapshot.availableCount, 4);
+  assert.notEqual(snapshot.cacheUnwritable, true);
+  assert.notEqual(snapshot.cacheDir, "C:\elsewhere");
 });

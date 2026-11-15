@@ -52,7 +52,7 @@ export function formatUsageLines(snapshot, now = Date.now(), {
       } else {
         credits.forEach((credit, index) => {
           // Re-cleaned here: a cached reading is read back from a file anything in the Codex home can write.
-          const title = stripControls(credit.title || "").slice(0, 200) || `Reset ${index + 1}`;
+          const title = (typeof credit.title === "string" ? stripControls(credit.title).slice(0, 200) : "") || `Reset ${index + 1}`;
           const expiresAt = epochMilliseconds(credit.expiresAt);
           if (!Number.isFinite(expiresAt)) {
             // Codex sending an explicit null means the reset never expires; a missing or

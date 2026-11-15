@@ -154,3 +154,10 @@ test("an expiry past the largest JavaScript date is shown as not supplied, not t
   const text = details({ credits: [{ title: "Far", expiresAt: 1e20 }], availableCount: 1, source: "cache", fetchedAt: NOW });
   assert.match(text, /Far — expiration not supplied/);
 });
+
+test("a reset title that is not text is shown as its row number, never thrown or printed as an object", () => {
+  for (const title of [{ toString: 1 }, {}, ["x"], 5]) {
+    const text = details({ credits: [{ title, expiresAt: 1_793_302_971 }], availableCount: 1, source: "cache", fetchedAt: NOW });
+    assert.match(text, /Reset 1 — expires/);
+  }
+});

@@ -299,6 +299,18 @@ export function resolveCodexLaunch(env = process.env, platform = process.platfor
       guardCurrentFolder: true,
     };
   }
+  if (windows) {
+    // A codex.exe may itself be a launcher that starts a bare "node" (Bun's global install makes
+    // one), which Windows would also look for in the current folder first. So every Windows launch
+    // runs from the program's own folder with the env guard set, as the cmd.exe one does.
+    const program = win32.resolve(target);
+    return {
+      command: program,
+      args,
+      ...(/^[\\/]{2}/.test(program) ? {} : { cwd: win32.dirname(program) }),
+      guardCurrentFolder: true,
+    };
+  }
   return { command: target, args };
 }
 
@@ -702,7 +714,11 @@ function fresh(cache, now) {
 async function readCache(path) {
   try {
     const value = JSON.parse(await readFile(path, "utf8"));
-    return value?.version === CACHE_VERSION && wellFormedCache(value) ? value : null;
+    if (value?.version !== CACHE_VERSION || !wellFormedCache(value)) return null;
+    // These describe one call (this process could not write the cache), never a stored reading.
+    delete value.cacheUnwritable;
+    delete value.cacheDir;
+    return value;
   } catch {
     return null;
   }
