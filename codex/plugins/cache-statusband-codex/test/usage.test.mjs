@@ -389,6 +389,16 @@ test("resolves a runnable Codex command from CODEX_BIN or the Windows PATH", asy
   }
   assert.equal(resolveCodexLaunch({ PATH: bin, ComSpec: "cmd.exe" }, "win32").command, "C:\\Windows\\System32\\cmd.exe");
   assert.equal(windowsSystemExe("taskkill.exe", { systemroot: "E:\\W" }), "E:\\W\\System32\\taskkill.exe");
+  // A wrapper runs from its own folder, so a relative CODEX_BIN is made full first (from inside
+  // "tools", "tools\codex.cmd" would mean tools\tools\codex.cmd); a UNC folder cannot be cmd.exe's.
+  if (process.platform === "win32") {
+    const relativeWrapper = resolveCodexLaunch({ CODEX_BIN: "tools\\codex.cmd" }, "win32");
+    assert.equal(relativeWrapper.cwd, win32.resolve("tools"));
+    assert.ok(relativeWrapper.args[4].includes(`"${win32.resolve("tools\\codex.cmd")}"`), relativeWrapper.args[4]);
+  }
+  const shared = resolveCodexLaunch({ CODEX_BIN: "\\\\server\\share\\codex.cmd" }, "win32");
+  assert.equal(shared.cwd, undefined);
+  assert.equal(shared.guardCurrentFolder, true);
   // A relative PATH entry resolves against the current folder, so it is never searched.
   if (process.platform === "win32") {
     assert.throws(() => resolveCodexLaunch({ PATH: relative(process.cwd(), other) }, "win32"), (error) => error.code === "ENOENT");

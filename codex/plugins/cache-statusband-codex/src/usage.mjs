@@ -281,7 +281,12 @@ export function resolveCodexLaunch(env = process.env, platform = process.platfor
     if (target.includes("%")) {
       throw new Error(`Cannot launch ${target}: cmd.exe cannot safely run a path containing "%". Set CODEX_BIN to codex.exe or move the Codex install.`);
     }
-    const line = [`"${target}"`, ...args].join(" ");
+    // A relative CODEX_BIN is fixed against the caller's folder now, before cmd.exe is moved to the
+    // wrapper's own folder below (from there, "tools\codex.cmd" would mean tools\tools\codex.cmd).
+    const wrapper = win32.resolve(target);
+    const line = [`"${wrapper}"`, ...args].join(" ");
+    // cmd.exe cannot run from a UNC folder; there the env guard set by the caller is the only one.
+    const unc = /^[\\/]{2}/.test(wrapper);
     return {
       command: absoluteOrNull(envValue(env, "ComSpec")) || windowsSystemExe("cmd.exe", env),
       // /v:off: delayed expansion would treat "!" in a path as a variable reference.
@@ -290,7 +295,8 @@ export function resolveCodexLaunch(env = process.env, platform = process.platfor
       // npm's codex.cmd runs a bare "node" when no node.exe sits beside it, and cmd.exe looks for a
       // bare name in its working folder first. So the wrapper runs from its own folder (which it
       // already checks first for node.exe), never from the caller's project or terminal folder.
-      cwd: win32.dirname(target),
+      ...(unc ? {} : { cwd: win32.dirname(wrapper) }),
+      guardCurrentFolder: true,
     };
   }
   return { command: target, args };
@@ -453,7 +459,7 @@ async function readAccountSession({
     ? resolveCodexLaunch(env, platform, args)
     : { command, args: args ?? ["app-server"] };
   // cmd.exe also honours this, as a second guard against running a program from its working folder.
-  if (launch.cwd) childEnv.NoDefaultCurrentDirectoryInExePath = "1";
+  if (launch.guardCurrentFolder) childEnv.NoDefaultCurrentDirectoryInExePath = "1";
   const child = spawnImpl(launch.command, launch.args, {
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
@@ -541,7 +547,7 @@ export async function fetchRateLimitsViaAppServer({
     ? resolveCodexLaunch(env, platform, args)
     : { command, args: args ?? ["app-server"] };
   // cmd.exe also honours this, as a second guard against running a program from its working folder.
-  if (launch.cwd) childEnv.NoDefaultCurrentDirectoryInExePath = "1";
+  if (launch.guardCurrentFolder) childEnv.NoDefaultCurrentDirectoryInExePath = "1";
   const child = spawnImpl(launch.command, launch.args, {
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
