@@ -281,6 +281,11 @@ export function resolveCodexLaunch(env = process.env, platform = process.platfor
       throw error;
     }
     target = found;
+  } else if (target && windows && !absoluteOrNull(target)) {
+    // Any other CODEX_BIN that is not a full path (".\codex.exe", "tools\codex.cmd", "C:codex.exe",
+    // "\codex.exe") would resolve against the current folder, the open project for the hooks, so
+    // it is refused, as the same forms are as PATH entries.
+    throw new Error(`CODEX_BIN is ${target}, which is not a full path, so it would be found relative to the current folder. Set CODEX_BIN to a full path, or to just the program name to look it up on PATH.`);
   }
   if (!target && windows) target = findOnWindowsPath(env);
   if (!target && windows) {
@@ -294,8 +299,6 @@ export function resolveCodexLaunch(env = process.env, platform = process.platfor
     if (target.includes("%")) {
       throw new Error(`Cannot launch ${target}: cmd.exe cannot safely run a path containing "%". Set CODEX_BIN to codex.exe or move the Codex install.`);
     }
-    // A relative CODEX_BIN is fixed against the caller's folder now, before cmd.exe is moved to the
-    // wrapper's own folder below (from there, "tools\codex.cmd" would mean tools\tools\codex.cmd).
     const wrapper = win32.resolve(target);
     const line = [`"${wrapper}"`, ...args].join(" ");
     // cmd.exe cannot run from a UNC folder; there the env guard set by the caller is the only one.

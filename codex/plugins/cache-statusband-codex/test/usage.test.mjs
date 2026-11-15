@@ -397,12 +397,10 @@ test("resolves a runnable Codex command from CODEX_BIN or the Windows PATH", { s
   }
   assert.equal(resolveCodexLaunch({ PATH: bin, ComSpec: "cmd.exe" }, "win32").command, "C:\\Windows\\System32\\cmd.exe");
   assert.equal(windowsSystemExe("taskkill.exe", { systemroot: "E:\\W" }), "E:\\W\\System32\\taskkill.exe");
-  // A wrapper runs from its own folder, so a relative CODEX_BIN is made full first (from inside
-  // "tools", "tools\codex.cmd" would mean tools\tools\codex.cmd); a UNC folder cannot be cmd.exe's.
-  if (process.platform === "win32") {
-    const relativeWrapper = resolveCodexLaunch({ CODEX_BIN: "tools\\codex.cmd" }, "win32");
-    assert.equal(relativeWrapper.cwd, win32.resolve("tools"));
-    assert.ok(relativeWrapper.args[4].includes(`"${win32.resolve("tools\\codex.cmd")}"`), relativeWrapper.args[4]);
+  // A CODEX_BIN that is neither a full path nor a bare name would resolve against the current
+  // folder (the open project, for the hooks), so it is refused; a UNC folder cannot be cmd.exe's.
+  for (const relativeBin of ["tools\\codex.cmd", ".\\codex.exe", "./codex.exe", "C:codex.exe", "\\codex.exe"]) {
+    assert.throws(() => resolveCodexLaunch({ CODEX_BIN: relativeBin, PATH: other }, "win32"), /not a full path/, relativeBin);
   }
   // A CODEX_BIN with no folder is a name looked up on full-path PATH entries, never the current folder.
   assert.equal(resolveCodexLaunch({ CODEX_BIN: "codex.exe", PATH: `${other}${delimiter}.` }, "win32").command, join(other, "codex.exe"));
