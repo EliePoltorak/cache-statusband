@@ -1275,3 +1275,26 @@ test("a stored cacheUnwritable or cacheDir is never shown as this call's state",
   assert.notEqual(snapshot.cacheUnwritable, true);
   assert.notEqual(snapshot.cacheDir, "C:\\elsewhere");
 });
+
+test("two captures of one email in different capitalisation share one cache and deadline", async () => {
+  const root = await mkdtemp(join(tmpdir(), "csb-email-case-"));
+  try {
+    const now = Date.parse("2026-10-29T12:00:00.000Z");
+    let calls = 0;
+    let email = TEST_EMAIL.toUpperCase();
+    const accountReader = async () => ({ email });
+    const fetcher = async () => { calls += 1; return { ...RAW, account: { email } }; };
+    const upper = await captureUsageIdentity(root, { env: {}, accountReader });
+    assert.equal(upper.key, `account:${TEST_EMAIL.toLowerCase()}`);
+    assert.equal(upper.label, TEST_EMAIL.toUpperCase());
+    await getUsageSnapshot({ codexHome: root, now, fetcher, env: {}, identity: upper });
+    email = TEST_EMAIL;
+    const lower = await captureUsageIdentity(root, { env: {}, accountReader });
+    assert.equal(lower.key, upper.key);
+    const second = await getUsageSnapshot({ codexHome: root, now: now + 1_000, fetcher, env: {}, identity: lower });
+    assert.equal(second.source, "cache");
+    assert.equal(calls, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

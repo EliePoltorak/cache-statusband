@@ -130,7 +130,7 @@ export async function getUsageSnapshot({
       saved = {
         ...emptyCache(),
         ...safe,
-        identityKey: identity?.key ?? (safe.accountEmail ? `account:${safe.accountEmail}` : null),
+        identityKey: identity?.key ?? (safe.accountEmail ? accountKey(safe.accountEmail) : null),
         fetchedAt: now,
         attemptedAt: now,
         nextAllowedAt: now + MIN_POLL_INTERVAL_MS,
@@ -200,7 +200,7 @@ export async function captureUsageIdentity(codexHome, {
     // email (an API key, say) is a different answer: someone IS signed in, but usage is
     // read per ChatGPT account, so there is nothing to read it for.
     if (!email && account != null) return fail("The signed-in Codex login has no ChatGPT account email", noEmailFlags(account));
-    return email ? { key: `account:${email}`, label: email, unavailable: false } : null;
+    return email ? { key: accountKey(email), label: email, unavailable: false } : null;
   }
   // A seat label asserts which login this session runs under, so a signed-out reading is
   // not an answer. The login is read twice on ONE app-server connection, with the seat file
@@ -226,7 +226,7 @@ export async function captureUsageIdentity(codexHome, {
     return null;
   }
   if (!email || again !== email) return fail("The Codex account changed while the seat was being confirmed");
-  return { key: `account:${email}`, label: seat.label, unavailable: false };
+  return { key: accountKey(email), label: seat.label, unavailable: false };
 }
 
 function noEmailFlags(account) {
@@ -824,6 +824,13 @@ function finiteNonnegative(value) {
 
 function safeText(value) {
   return typeof value === "string" ? stripControls(value).slice(0, 200) : null;
+}
+
+// The account part of an identity key is case-folded, as sameEmail compares logins, so two
+// captures that differ only in an email's capitalisation share one cache, lock and deadline.
+// The label keeps the email as Codex reported it.
+function accountKey(email) {
+  return `account:${email.toLowerCase()}`;
 }
 
 function sameEmail(a, b) {

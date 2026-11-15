@@ -159,8 +159,8 @@ function Get-RegisteredMarketplaceSource([AllowNull()][string]$Text, [string]$Na
   $sourcePattern = '^\s*source\s*=\s*(?:' + $single + '([^' + $single + ']*)' + $single + '|"((?:[^"\\]|\\.)*)")'
   $inSection = $false
   foreach ($line in ($Text -split "`r?`n")) {
-    if ($line -match '^\s*\[') { $inSection = $line -match $headerPattern; continue }
-    if ($inSection -and $line -match $sourcePattern) {
+    if ($line -match '^\s*\[') { $inSection = $line -cmatch $headerPattern; continue }
+    if ($inSection -and $line -cmatch $sourcePattern) {
       if ($Matches.ContainsKey(1)) { return $Matches[1] }
       return ($Matches[2] -replace '\\(.)', '$1')
     }
@@ -241,20 +241,22 @@ function Set-TomlKey {
   for ($i = 0; $i -lt $lines.Count; $i += 1) {
     $line = $lines[$i]
     if ($startDepth[$i] -gt 0) { continue }
-    if ($line -match $quotedHeaderPattern) {
+    if ($line -cmatch $quotedHeaderPattern) {
       throw "config.toml defines [$Section] with a quoted header; configure the footer and hooks manually, or rewrite it as a plain [$Section] table first$skipHint"
     }
     if ($line -match '^\s*\[') { $inRootTable = $false }
-    if ($inRootTable -and $line -match $topLevelPattern) {
+    if ($inRootTable -and $line -cmatch $topLevelPattern) {
       throw "config.toml defines the $Section table with dotted keys or an inline table; configure the footer and hooks manually, or rewrite it as a plain [$Section] table first$skipHint"
     }
   }
 
+  # TOML table and key names are case-sensitive, so every name match below is too (-cmatch):
+  # a [TUI] table is not [tui], and editing it would leave Codex's own setting unchanged.
   $header = "[$Section]"
   $sectionPattern = '^\s*\[\s*' + [Regex]::Escape($Section) + '\s*\]\s*(?:#.*)?$'
   $sectionStarts = @()
   for ($i = 0; $i -lt $lines.Count; $i += 1) {
-    if ($startDepth[$i] -eq 0 -and $lines[$i] -match $sectionPattern) { $sectionStarts += $i }
+    if ($startDepth[$i] -eq 0 -and $lines[$i] -cmatch $sectionPattern) { $sectionStarts += $i }
   }
   if ($sectionStarts.Count -gt 1) { throw "config.toml contains more than one [$Section] section" }
   $sectionStart = if ($sectionStarts.Count -eq 1) { $sectionStarts[0] } else { -1 }
@@ -273,7 +275,7 @@ function Set-TomlKey {
   $keyPattern = '^\s*' + [Regex]::Escape($Key) + '\s*='
   $keyLines = @()
   for ($i = $sectionStart + 1; $i -lt $sectionEnd; $i += 1) {
-    if ($startDepth[$i] -eq 0 -and $lines[$i] -match $keyPattern) { $keyLines += $i }
+    if ($startDepth[$i] -eq 0 -and $lines[$i] -cmatch $keyPattern) { $keyLines += $i }
   }
   if ($keyLines.Count -gt 1) { throw "config.toml contains more than one $Key assignment in [$Section]" }
   if ($keyLines.Count -eq 1) {

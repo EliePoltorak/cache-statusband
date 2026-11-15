@@ -271,6 +271,9 @@ status_line_use_colors = false
   }
   $withMark = Set-TomlKey -Text ([string][char]0xFEFF + "[features]`nhooks = false`n") -Section "features" -Key "hooks" -Value "true"
   if ($withMark -ne "[features]`nhooks = true`n") { throw "Set-TomlKey did not see a header behind a byte-order mark: $withMark" }
+  # TOML names are case-sensitive: a [TUI] table is not [tui], so the edit goes into a new [tui].
+  $upper = Set-TomlKey -Text "[TUI]`nstatus_line = 1`n" -Section "tui" -Key "status_line" -Value "2"
+  if ($upper -cnotmatch '(?m)^\[tui\]$' -or $upper -cnotmatch '(?m)^status_line = 1$') { throw "Set-TomlKey edited an uppercase [TUI] table as [tui]: $upper" }
 
   # An explicit access entry on config.toml survives the install: the candidate that replaces it is
   # a new file, so the installer copies the old file's access list onto it first. (BUILTIN\Guests

@@ -194,7 +194,13 @@ function scalarSource(value) {
 async function readEdges(path, size) {
   const handle = await open(path, "r");
   try {
-    if (size <= HEAD_BYTES + TAIL_BYTES) return { head: null, tail: await handle.readFile({ encoding: "utf8" }), truncated: false };
+    if (size <= HEAD_BYTES + TAIL_BYTES) {
+      // Read only the bytes measured: a live transcript can grow between the size check and
+      // this read, and an unbounded read would load whatever was appended.
+      const whole = Buffer.alloc(size);
+      const { bytesRead } = await handle.read(whole, 0, size, 0);
+      return { head: null, tail: whole.subarray(0, bytesRead).toString("utf8"), truncated: false };
+    }
     const head = Buffer.alloc(HEAD_BYTES);
     const tail = Buffer.alloc(TAIL_BYTES);
     await handle.read(head, 0, HEAD_BYTES, 0);
