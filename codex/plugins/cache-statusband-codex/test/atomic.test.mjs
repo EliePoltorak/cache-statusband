@@ -267,7 +267,9 @@ test("empty results from a busy lock, a cache-only read or an unwritable cache k
   const unnamed = await usagePresentation({ source: "cache-busy", identityKey: null, availableCount: null }, { codexHome: busyRoot, env: {}, identity: IDENTITY });
   assert.equal(unnamed.snapshot.source, "cache-busy");
   // A different key still is.
-  const other = await usagePresentation({ source: "cache", identityKey: "account:other@example.invalid", availableCount: 5 }, { codexHome: busyRoot, env: {}, identity: IDENTITY });
+  const other = await usagePresentation({ source: "cache", identityKey: "account:other@example.invalid", availableCount: 5, fetchedAt: NOW - 180_000 }, { codexHome: busyRoot, env: {}, identity: IDENTITY });
   assert.equal(other.snapshot.source, "identity-changed");
   assert.equal(other.snapshot.availableCount, null);
+  // Its age is the other account's, so it is not shown either.
+  assert.equal(other.snapshot.fetchedAt, null);
 });

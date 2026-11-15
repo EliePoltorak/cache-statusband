@@ -80,6 +80,15 @@ test("a seat that became unavailable after this run captured it shows nothing; a
   assert.equal(relabelled.identity, null);
   assert.equal(relabelled.snapshot.availableCount, null);
   assert.deepEqual(formatUsageLines(relabelled.snapshot, Date.now(), { identity: relabelled.identity }), ["Banked resets: unavailable"]);
+  // So does a seat that appeared after the run captured the email (no seat at capture).
+  const emailCaptured = { key: `account:${EMAIL}`, label: EMAIL, unavailable: false };
+  const appeared = await usagePresentation(reading, { codexHome: root, env: { CACHE_STATUSBAND_CODEX_SEAT_FILE: seatFile }, identity: emailCaptured, current: true });
+  assert.deepEqual(formatUsageLines(appeared.snapshot, Date.now(), { identity: appeared.identity }), ["Banked resets: unavailable"]);
+  // And a captured seat label whose seat setting is gone entirely.
+  const noSeatRoot = await homeWith(t, undefined);
+  const removed = await usagePresentation(reading, { codexHome: noSeatRoot, env: {}, identity: captured, current: true });
+  assert.equal(removed.seatConfigured, false);
+  assert.deepEqual(formatUsageLines(removed.snapshot, Date.now(), { identity: removed.identity }), ["Banked resets: unavailable"]);
   // The same label still shows the reading.
   await writeFile(seatFile, "A\n");
   const same = await usagePresentation(reading, { codexHome: root, env: { CACHE_STATUSBAND_CODEX_SEAT_FILE: seatFile }, identity: captured, current: true });

@@ -162,12 +162,21 @@ test("an older Stop result cannot replace a newer saved context snapshot", async
   assert.equal((await loadSessionState(root, "session-1")).contextUsed, 50000);
 });
 
+// A seat label in a faked capture must match a configured seat, as a real capture's does.
+async function configureSeat(root, label) {
+  const seat = join(root, "seat.txt");
+  await writeFile(seat, label);
+  await mkdir(join(root, "cache-statusband-codex"), { recursive: true });
+  await writeFile(join(root, "cache-statusband-codex", "settings.json"), JSON.stringify({ version: 1, seatFile: seat }));
+}
+
 test("resuming a session retains its starting identity after account rotation", async (t) => {
   const root = await fixtureRoot(t);
   const path = join(root, "rollout.jsonl");
   await writeFixture(path);
   const email = ["initial", "example.invalid"].join("@");
   const original = { key: `account:${email}`, label: ["Seat", "fixture-start"].join(" "), unavailable: false };
+  await configureSeat(root, "fixture-start");
   let captures = 0;
   const options = {
     codexHome: root,
@@ -400,6 +409,7 @@ test("a transcript read that never finishes cannot push the hook past its deadli
   const root = await fixtureRoot(t);
   const email = ["person", "example.invalid"].join("@");
   const identity = { key: `account:${email}`, label: "Seat slow", unavailable: false };
+  await configureSeat(root, "slow");
   const started = Date.now();
   const output = await handleSessionStart(
     { source: "startup", session_id: "slow-transcript", transcript_path: join(root, "rollout.jsonl") },

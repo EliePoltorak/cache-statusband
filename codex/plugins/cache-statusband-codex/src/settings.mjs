@@ -38,9 +38,12 @@ function presentFor(snapshot, seat, suppliedIdentity, current) {
   // Built from an empty shape, not the reading: its times and cache notes belong to an account
   // this run no longer names, and a seat unavailable from the start shows none of them either.
   // A seat now holding a different label than the one captured is treated the same way: the
-  // capture refuses a change while it runs, and a change just after it is no different.
-  const relabelled = current && seat && !seat.unavailable && isSeatLabel(suppliedIdentity) && suppliedIdentity.label !== seat.label;
-  if ((current && seat?.unavailable) || relabelled) {
+  // capture refuses a change while it runs, and a change just after it is no different. That
+  // includes a seat that appeared after the run captured an email (no seat at the time).
+  const relabelled = current && seat && !seat.unavailable && suppliedIdentity && suppliedIdentity.label !== seat.label;
+  // And a captured seat label whose seat is no longer configured at all.
+  const unseated = current && !seat && isSeatLabel(suppliedIdentity);
+  if ((current && seat?.unavailable) || relabelled || unseated) {
     return {
       identity: null,
       snapshot: {
@@ -75,8 +78,14 @@ function presentFor(snapshot, seat, suppliedIdentity, current) {
   if (!identity.unavailable && snapshot && (snapshot.identityKey === null || snapshot.identityKey === undefined || snapshot.identityKey === identity.key)) return { snapshot, identity: identity.label };
   return {
     identity: identity.label,
+    // Another account's reading: none of it is shown, its times included. Whether this call
+    // could write the cache is this call's own state, so that note stays.
     snapshot: {
       ...snapshot,
+      attemptedAt: null,
+      fetchedAt: null,
+      nextAllowedAt: null,
+      lastErrorAt: null,
       accountEmail: null,
       availableCount: null,
       credits: null,
