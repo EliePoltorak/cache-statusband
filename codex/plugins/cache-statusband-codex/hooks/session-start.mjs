@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { formatUsageLines } from "../src/format.mjs";
 import { defaultCodexHome, parseRollout } from "../src/rollouts.mjs";
@@ -29,7 +30,9 @@ export async function handleSessionStart(input, {
   startedAt = Date.now(),
 } = {}) {
   const source = input?.source;
-  if (!["startup", "resume", "fork"].includes(source)) return {};
+  // "clear" starts a fresh chat; it is handled like a startup (an existing record is kept).
+  if (!["startup", "resume", "clear", "fork"].includes(source)) return {};
+  const enteredAt = Date.now();
   const started = startedAt;
   const readBudget = () => Math.max(READ_MARGIN_MS, deadlineMs - (Date.now() - started) - READ_MARGIN_MS);
   const messages = [];
@@ -74,7 +77,7 @@ export async function handleSessionStart(input, {
       const timeoutMs = Math.max(READ_MARGIN_MS, remaining - READ_MARGIN_MS);
       // The usage read's clock starts now, not when the hook began: the identity read above
       // must not be deducted from a relative Retry-After the usage read may record.
-      const usageNow = now + Math.max(0, Date.now() - started);
+      const usageNow = now + Math.max(0, Date.now() - enteredAt);
       const usage = await usageGetter({ codexHome: home, now: usageNow, identity, timeoutMs, ...(cacheOnly ? { cacheOnly: true } : {}) });
       const presented = await usagePresentation(usage, { codexHome: home, identity, current: source !== "resume" });
       const built = [];
@@ -138,4 +141,6 @@ async function readStdin(limit) {
   return result;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();
+// Node resolves the main module through junctions and links but leaves argv[1] as given.
+const entry = () => { try { return pathToFileURL(realpathSync(process.argv[1])).href; } catch { return null; } };
+if (process.argv[1] && import.meta.url === entry()) await main();

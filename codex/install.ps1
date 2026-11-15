@@ -410,6 +410,8 @@ function Test-CodexConfig {
     }
     if ($LASTEXITCODE -eq 0) { return [pscustomobject]@{ Passed = $true; CouldNotRun = $false; Detail = "" } }
     $detail = Get-CodexFailureDetail -Output $validationOutput
+    # Matches Codex's own English error text, checked against codex-cli 0.169. A reworded
+    # release makes this miss, and the install then stops and restores config.toml.
     $couldNotRun = $detail -match 'unexpected argument|unrecognized (option|subcommand)|Usage: codex'
     return [pscustomobject]@{ Passed = $false; CouldNotRun = $couldNotRun; Detail = $detail }
   } finally {
@@ -573,6 +575,8 @@ try {
     $addOutput = @(& $codexCommand plugin marketplace add $repositoryRoot 2>&1 | ForEach-Object { "$_" })
     $addExit = $LASTEXITCODE
     $addOutput
+    # Codex's English refusal text, checked against codex-cli 0.169. If a release rewords it,
+    # re-pointing a moved checkout fails closed: config.toml is restored and the error is shown.
     if ($addExit -ne 0 -and (($addOutput -join "`n") -match 'already added from a different source')) {
       if ($registeredSource) {
         $registeredShown = if ($registeredSource.StartsWith('\\?\')) { $registeredSource.Substring(4) } else { $registeredSource }

@@ -50,7 +50,18 @@ export async function getUsageSnapshot({
   const cachePath = join(dataDir, `rate-limits${suffix}.json`);
   const lockPath = join(dataDir, `rate-limits${suffix}.lock`);
   const legacyPath = join(dataDir, "rate-limits.json");
-  let aligned = alignCache(await readScopedCache(cachePath, legacyPath, identity), identity);
+  // A cache file that exists but cannot be read (anything but "not found") hides a stored
+  // backoff and the last good reading, so it is treated like a busy cache: no live read.
+  const readStored = async () => {
+    try {
+      return alignCache(await readScopedCache(cachePath, legacyPath, identity), identity);
+    } catch (error) {
+      if (error?.cacheUnreadable) return null;
+      throw error;
+    }
+  };
+  let aligned = await readStored();
+  if (!aligned) return show(null, "cache-busy");
   let cached = aligned.cache;
   if (fresh(cached, now) && !cached?.migrateSeatDeadline) return show(cached, aligned.mismatch ? "identity-changed" : "cache");
   if (cacheOnly) {
@@ -97,7 +108,8 @@ export async function getUsageSnapshot({
     return show(cached ? stored : null, aligned.mismatch ? "identity-changed" : "cache-busy");
   }
   try {
-    aligned = alignCache(await readScopedCache(cachePath, legacyPath, identity), identity);
+    aligned = await readStored();
+    if (!aligned) return show(null, "cache-busy");
     cached = aligned.cache;
     if (fresh(cached, now)) {
       const { migrateSeatDeadline, ...saved } = cached;
@@ -540,6 +552,7 @@ async function readAccountSession({
       }
       // Server notifications/requests may reuse ids; only a bare response is ours. Id 2 is
       // the first read; id 4 exists only on a two-read connection.
+      if (!message || typeof message !== "object") return;
       if (message.method !== undefined || (message.id !== 2 && !(reads === 2 && message.id === 4))) return;
       if (message.error) {
         finish(reject, new Error("Codex account read failed"));
@@ -630,7 +643,7 @@ export async function fetchRateLimitsViaAppServer({
       } catch {
         return;
       }
-      if (message.method !== undefined) return;
+      if (!message || typeof message !== "object" || message.method !== undefined) return;
       if (message.id === 2) {
         if (account !== null) return;
         account = message.error ? {} : message.result?.account ?? {};
@@ -752,7 +765,11 @@ async function readCache(path) {
     delete value.cacheUnwritable;
     delete value.cacheDir;
     return value;
-  } catch {
+  } catch (error) {
+    // Not found, a folder where the file belongs (or a file where the folder belongs), or not
+    // valid JSON: no stored reading, and the cache is then reported unwritable. Any other read
+    // failure is reported, so it is not mistaken for an absent backoff.
+    if (error?.code && !["ENOENT", "EISDIR", "ENOTDIR"].includes(error.code)) throw Object.assign(error, { cacheUnreadable: true });
     return null;
   }
 }

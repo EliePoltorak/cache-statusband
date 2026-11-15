@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, copyFile, mkdtemp, mkdir, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdtemp, mkdir, readdir, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { execFile, execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -1419,4 +1419,66 @@ test("SessionStart: the identity read's time is not deducted from the usage read
     },
   );
   assert.ok(usageNow >= now + 350, `the usage read was given a clock only ${usageNow - now} ms past the hook's start`);
+});
+
+test("SessionStart: time before the handler was entered does not advance the usage read's clock", async (t) => {
+  const root = await fixtureRoot(t);
+  const path = join(root, "rollout.jsonl");
+  await writeFixture(path);
+  const email = ["person", "example.invalid"].join("@");
+  const now = Date.parse("2026-10-29T12:04:00.000Z");
+  let usageNow = null;
+  await handleSessionStart(
+    { source: "startup", session_id: "session-clock-late", transcript_path: path },
+    {
+      codexHome: root,
+      now,
+      startedAt: Date.now() - 2_000,
+      identityGetter: async () => ({ key: `account:${email}`, label: email, unavailable: false }),
+      usageGetter: async (options) => {
+        usageNow = options.now;
+        return { identityKey: `account:${email}`, accountEmail: email, availableCount: 2, credits: [], fetchedAt: options.now, source: "live" };
+      },
+    },
+  );
+  assert.ok(usageNow - now < 1_000, `the usage read's clock ran ${usageNow - now} ms ahead`);
+});
+
+test("SessionStart: a chat begun with /clear is handled like a startup", async (t) => {
+  const root = await fixtureRoot(t);
+  const path = join(root, "rollout.jsonl");
+  await writeFixture(path);
+  const email = ["person", "example.invalid"].join("@");
+  let captured = 0;
+  const output = await handleSessionStart(
+    { source: "clear", session_id: "session-clear", transcript_path: path },
+    {
+      codexHome: root,
+      now: Date.parse("2026-10-29T12:04:00.000Z"),
+      identityGetter: async () => { captured += 1; return { key: `account:${email}`, label: email, unavailable: false }; },
+      usageGetter: async () => ({ identityKey: `account:${email}`, accountEmail: email, availableCount: 2, credits: [], fetchedAt: Date.parse("2026-10-29T12:04:00.000Z"), source: "live" }),
+    },
+  );
+  assert.equal(captured, 1);
+  assert.match(output.systemMessage, /Banked resets: 2/);
+  const hooks = JSON.parse(await readFile(join(dirname(fileURLToPath(import.meta.url)), "..", "hooks", "hooks.json"), "utf8"));
+  assert.match(hooks.hooks.SessionStart[0].matcher, /(^|\|)clear(\||$)/);
+});
+
+test("both hooks run when started through a junction or link to the plugin folder", async (t) => {
+  const root = await fixtureRoot(t);
+  const plugin = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const link = join(root, "linked-plugin");
+  await symlink(plugin, link, process.platform === "win32" ? "junction" : "dir");
+  for (const hook of ["session-start.mjs", "stop.mjs"]) {
+    const child = execFile(process.execPath, [join(link, "hooks", hook)], { env: { ...process.env, CODEX_HOME: root } });
+    child.stdin.end(JSON.stringify({ source: "compact" }));
+    const stdout = await new Promise((done, fail) => {
+      let text = "";
+      child.stdout.on("data", (chunk) => { text += chunk; });
+      child.on("error", fail);
+      child.on("close", () => done(text));
+    });
+    assert.equal(stdout.trim(), "{}", `${hook} printed nothing when started through a link`);
+  }
 });

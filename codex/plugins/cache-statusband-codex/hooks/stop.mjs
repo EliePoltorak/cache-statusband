@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { defaultCodexHome, parseRollout } from "../src/rollouts.mjs";
 import { saveSessionState } from "../src/session-state.mjs";
@@ -39,4 +40,6 @@ async function readStdin(limit) {
   return result;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();
+// Node resolves the main module through junctions and links but leaves argv[1] as given.
+const entry = () => { try { return pathToFileURL(realpathSync(process.argv[1])).href; } catch { return null; } };
+if (process.argv[1] && import.meta.url === entry()) await main();

@@ -1458,3 +1458,14 @@ test("time spent before the read (a slow attempt-marker write) is not deducted f
   const failed = await getUsageSnapshot({ codexHome: root, now, fetcher, identity: ACCOUNT_IDENTITY, renameImpl });
   assert.ok(failed.nextAllowedAt >= now + 600_000 + 350, `nextAllowedAt is only ${failed.nextAllowedAt - now} ms after the call began`);
 });
+
+test("a line that is the JSON literal null does not crash either app-server reader", async () => {
+  // Prints `null`, then exits: the read must fail normally rather than throw out of the listener.
+  const script = "process.stdout.write('null' + String.fromCharCode(10)); setTimeout(() => process.exit(3), 200);";
+  for (const reader of [readAccountViaAppServer, fetchRateLimitsViaAppServer]) {
+    await assert.rejects(
+      reader({ codexHome: tmpdir(), command: process.execPath, args: ["-e", script], timeoutMs: 5_000, env: process.env, expectedEmail: TEST_EMAIL }),
+      /exited before/,
+    );
+  }
+});

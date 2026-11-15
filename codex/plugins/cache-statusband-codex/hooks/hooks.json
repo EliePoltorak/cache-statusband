@@ -3,7 +3,7 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume|fork",
+        "matcher": "startup|resume|clear|fork",
         "hooks": [
           {
             "type": "command",
