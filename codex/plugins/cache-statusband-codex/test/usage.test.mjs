@@ -409,11 +409,12 @@ test("resolves a runnable Codex command from CODEX_BIN or the Windows PATH", { s
   assert.equal(resolveCodexLaunch({ CODEX_BIN: "codex.exe", PATH: `${other}${delimiter}.` }, "win32").command, join(other, "codex.exe"));
   assert.equal(resolveCodexLaunch({ CODEX_BIN: "codex", PATH: other }, "win32").command, join(other, "codex.exe"));
   assert.throws(() => resolveCodexLaunch({ CODEX_BIN: "codex.exe", PATH: "." }, "win32"), (error) => error.code === "ENOENT" && /CODEX_BIN names codex\.exe/.test(error.message));
-  // cmd.exe cannot run from a UNC folder, so a shared codex.cmd gets no folder, only the guard.
-  const shared = resolveCodexLaunch({ CODEX_BIN: "\\\\server\\share\\codex.cmd" }, "win32");
-  assert.equal(shared.cwd, undefined);
+  // cmd.exe swaps a UNC working folder for the Windows folder, so a shared codex.cmd runs from
+  // cmd.exe's own folder: never the caller's.
+  const shared = resolveCodexLaunch({ CODEX_BIN: "\\\\server\\share\\codex.cmd", ComSpec }, "win32");
+  assert.equal(shared.cwd, "C:\\Windows\\System32");
   assert.equal(shared.guardCurrentFolder, true);
-  // A program, unlike cmd.exe, can run from a UNC folder, so a shared codex.exe still gets its own.
+  // A program can run from a UNC folder, so a shared codex.exe gets its own.
   assert.equal(resolveCodexLaunch({ CODEX_BIN: "\\\\server\\share\\codex.exe" }, "win32").cwd, "\\\\server\\share\\");
   // A relative PATH entry resolves against the current folder, so it is never searched.
   if (process.platform === "win32") {

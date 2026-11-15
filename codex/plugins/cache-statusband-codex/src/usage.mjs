@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstatSync, statSync } from "node:fs";
 import { readFile, unlink, writeFile } from "node:fs/promises";
-import { delimiter, dirname, join, win32 } from "node:path";
+import { delimiter, dirname, join, resolve, win32 } from "node:path";
 import { createInterface } from "node:readline";
 import { makeFolder, renameWithRetry } from "./atomic.mjs";
 import { MAX_RETRY_AFTER_MS, retryAfterMilliseconds } from "./retry-after.mjs";
@@ -263,8 +263,8 @@ export function codexHomeIsMissing(home, stat = statSync) {
 // Node cannot spawn codex.cmd (npm installs) without a shell and refuses .cmd/.bat
 // directly. Resolve what to run: CODEX_BIN, else a codex executable found on PATH,
 // with .cmd/.bat wrapped through cmd.exe. On Windows every launch runs from the program's own
-// folder with NoDefaultCurrentDirectoryInExePath set (except a .cmd on a UNC share, where only the
-// variable applies), and a bare "codex" is never spawned:
+// folder (cmd.exe's own folder for a .cmd on a UNC share) with NoDefaultCurrentDirectoryInExePath
+// set, and a bare "codex" is never spawned:
 // Windows looks in the current folder before PATH, so it would run a codex.exe planted in
 // whatever project or folder the command was started from.
 export function resolveCodexLaunch(env = process.env, platform = process.platform, args = ["app-server"]) {
@@ -303,17 +303,19 @@ export function resolveCodexLaunch(env = process.env, platform = process.platfor
     // Normalised to backslashes; the folder cmd.exe runs from is taken from it below.
     const wrapper = win32.resolve(target);
     const line = [`"${wrapper}"`, ...args].join(" ");
-    // cmd.exe cannot run from a UNC folder; there the env guard set by the caller is the only one.
+    // cmd.exe swaps a UNC working folder for the Windows folder (with a warning on stderr), so a
+    // wrapper on a share runs from cmd.exe's own folder instead: still never the caller's.
     const unc = /^[\\/]{2}/.test(wrapper);
+    const shell = absoluteOrNull(envValue(env, "ComSpec")) || windowsSystemExe("cmd.exe", env);
     return {
-      command: absoluteOrNull(envValue(env, "ComSpec")) || windowsSystemExe("cmd.exe", env),
+      command: shell,
       // /v:off: delayed expansion would treat "!" in a path as a variable reference.
       args: ["/d", "/v:off", "/s", "/c", `"${line}"`],
       windowsVerbatimArguments: true,
       // npm's codex.cmd runs a bare "node" when no node.exe sits beside it, and cmd.exe looks for a
       // bare name in its working folder first. So the wrapper runs from its own folder (which it
       // already checks first for node.exe), never from the caller's project or terminal folder.
-      ...(unc ? {} : { cwd: win32.dirname(wrapper) }),
+      cwd: win32.dirname(unc ? shell : wrapper),
       guardCurrentFolder: true,
     };
   }
@@ -325,7 +327,6 @@ export function resolveCodexLaunch(env = process.env, platform = process.platfor
     return {
       command: program,
       args,
-      // Unlike cmd.exe, a program can run from a UNC folder, so a share gets its folder too.
       cwd: win32.dirname(program),
       guardCurrentFolder: true,
     };
@@ -489,7 +490,8 @@ async function readAccountSession({
   between,
 } = {}, reads) {
   const childEnv = { ...env };
-  if (codexHome) childEnv.CODEX_HOME = codexHome;
+  // Full path: the child runs from its own folder, where a relative home would mean another place.
+  if (codexHome) childEnv.CODEX_HOME = resolve(codexHome);
   const launch = command === undefined
     ? resolveCodexLaunch(env, platform, args)
     : { command, args: args ?? ["app-server"] };
@@ -578,7 +580,8 @@ export async function fetchRateLimitsViaAppServer({
   // against, and a rate-limit request would spend whichever account happens to be signed in.
   if (!safeEmail(expectedEmail)) throw new Error("fetchRateLimitsViaAppServer requires the expected account email");
   const childEnv = { ...env };
-  if (codexHome) childEnv.CODEX_HOME = codexHome;
+  // Full path: the child runs from its own folder, where a relative home would mean another place.
+  if (codexHome) childEnv.CODEX_HOME = resolve(codexHome);
   const launch = command === undefined
     ? resolveCodexLaunch(env, platform, args)
     : { command, args: args ?? ["app-server"] };
