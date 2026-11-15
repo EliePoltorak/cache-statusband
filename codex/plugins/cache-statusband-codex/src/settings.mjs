@@ -22,8 +22,20 @@ export async function usagePresentation(snapshot, {
   codexHome,
   env = process.env,
   identity: suppliedIdentity,
+  current = false,
 } = {}) {
   const seat = codexHome ? await configuredSeatIdentity(codexHome, env) : null;
+  // `current`: the supplied identity was captured for THIS run (a CLI run, or a new or forked
+  // session), not recorded earlier. If the seat has become unavailable since it was captured,
+  // that run shows nothing, as it would had the seat been unavailable from the start. A
+  // resumed session's recorded identity is history and is not affected.
+  if (current && seat?.unavailable) {
+    const { accountEmail, identityKey, ...rest } = snapshot ?? {};
+    return {
+      identity: null,
+      snapshot: { ...rest, availableCount: null, credits: null, creditsOmitted: null, creditsNotAvailable: null, primary: null, secondary: null, source: "identity-unavailable" },
+    };
+  }
   const identity = suppliedIdentity === undefined ? seat : suppliedIdentity;
   // A supplied identity may be a RECORDED one (a resumed session's), made when no seat was
   // configured, so its label can be the account email. With a seat configured NOW (available

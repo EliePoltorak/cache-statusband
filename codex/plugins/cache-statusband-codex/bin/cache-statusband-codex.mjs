@@ -56,7 +56,7 @@ async function board(argv) {
     const identity = await captureIdentityOrSay(home);
     const usageSnapshot = await getUsageSnapshot({ codexHome: home, identity });
     warnIfCacheUnwritable(usageSnapshot);
-    presented = await usagePresentation(usageSnapshot, { codexHome: home, identity });
+    presented = await usagePresentation(usageSnapshot, { codexHome: home, identity, current: true });
   } catch (error) {
     usageKnown = false;
     process.stderr.write(`cache-statusband-codex: usage not read: ${stripControls(error?.message ?? String(error))}\n`);
@@ -91,7 +91,7 @@ async function usage(argv) {
   const identity = await captureIdentityOrSay(home);
   const snapshot = await getUsageSnapshot({ codexHome: home, identity });
   warnIfCacheUnwritable(snapshot);
-  const presented = await usagePresentation(snapshot, { codexHome: home, identity });
+  const presented = await usagePresentation(snapshot, { codexHome: home, identity, current: true });
   if (options.json) process.stdout.write(`${json(await publicSnapshot(presented.snapshot, home))}\n`);
   else process.stdout.write(`${formatUsageLines(presented.snapshot, Date.now(), { includeResetDetails: true, identity: presented.identity }).join("\n")}\n`);
 }

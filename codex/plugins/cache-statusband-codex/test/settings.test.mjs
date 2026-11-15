@@ -51,6 +51,24 @@ test("an unreadable or malformed settings.json fails closed instead of meaning n
   assert.equal(shown.snapshot.creditsNotAvailable, null);
 });
 
+test("a seat that became unavailable after this run captured it shows nothing; a resume keeps its record", async (t) => {
+  // The run captured "Seat A" while the seat was available; by presentation time it is not.
+  const root = await homeWith(t, undefined);
+  await mkdir(join(root, "cache-statusband-codex", "settings.json"));
+  const captured = { key: `account:${EMAIL}`, label: "Seat A", unavailable: false };
+  const reading = { accountEmail: EMAIL, availableCount: 2, credits: [], creditsOmitted: 0, creditsNotAvailable: 0, identityKey: `account:${EMAIL}`, source: "live" };
+  const now = await usagePresentation(reading, { codexHome: root, env: {}, identity: captured, current: true });
+  assert.equal(now.identity, null);
+  assert.equal(now.snapshot.availableCount, null);
+  assert.equal(now.snapshot.credits, null);
+  assert.equal(now.snapshot.accountEmail, undefined);
+  assert.equal(now.snapshot.source, "identity-unavailable");
+  // A resumed session's recorded identity is history: its seat label and reading stay.
+  const resumed = await usagePresentation(reading, { codexHome: root, env: {}, identity: captured });
+  assert.equal(resumed.identity, "Seat A");
+  assert.equal(resumed.snapshot.availableCount, 2);
+});
+
 test("a malformed settings.json never lets the CLI show or emit the account email", async (t) => {
   const root = await homeWith(t, "{not json");
   const here = dirname(fileURLToPath(import.meta.url));

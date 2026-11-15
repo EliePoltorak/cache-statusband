@@ -73,7 +73,7 @@ export async function handleSessionStart(input, {
       const cacheOnly = remaining < MIN_FETCH_BUDGET_MS + READ_MARGIN_MS;
       const timeoutMs = Math.max(READ_MARGIN_MS, remaining - READ_MARGIN_MS);
       const usage = await usageGetter({ codexHome: home, now, identity, timeoutMs, ...(cacheOnly ? { cacheOnly: true } : {}) });
-      const presented = await usagePresentation(usage, { codexHome: home, identity });
+      const presented = await usagePresentation(usage, { codexHome: home, identity, current: source !== "resume" });
       const built = [];
       // A resumed session's identity is the one it STARTED under, which may no longer be the
       // login in use, so on a resume the wording says so rather than naming a current account.
