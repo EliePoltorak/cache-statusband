@@ -294,11 +294,12 @@ status_line_use_colors = false
       }).Count -eq 1
     }
     if (-not (& $hasGuestEntry)) { throw "The explicit access entry fixture was not set on config.toml" }
-    # A fake codex that registers nothing and rewrites nothing: the real one rewrites config.toml
-    # itself during `plugin add`, which would drop the entry before the installer's replace.
+    # A fake codex that registers nothing but, like the real one, rewrites config.toml during its
+    # `plugin` steps as a new file (so the explicit entry is gone from the live file by the time the
+    # installer replaces it). The entry must still come back: it is taken from the backup.
     $aclBin = Join-Path $testHome "acl-bin"
     New-Item -ItemType Directory -Path $aclBin | Out-Null
-    [IO.File]::WriteAllText((Join-Path $aclBin "codex.cmd"), "@echo off`r`nexit /b 0`r`n", [Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText((Join-Path $aclBin "codex.cmd"), "@echo off`r`nif /i ""%1""==""plugin"" (`r`n  type ""%CODEX_HOME%\config.toml"" > ""%CODEX_HOME%\rewrite.tmp""`r`n  del ""%CODEX_HOME%\config.toml""`r`n  move /y ""%CODEX_HOME%\rewrite.tmp"" ""%CODEX_HOME%\config.toml"" >nul`r`n)`r`nexit /b 0`r`n", [Text.Encoding]::ASCII)
     $previousPath = $env:PATH
     try {
       $env:PATH = "$aclBin$([IO.Path]::PathSeparator)$previousPath"

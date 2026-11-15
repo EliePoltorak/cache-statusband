@@ -1069,15 +1069,16 @@ test("a turn_context that names no model leaves the folder alone too, wherever i
 test("rate limits are reduced to numeric primary/secondary window fields", async (t) => {
   const root = await fixtureRoot(t);
   const path = join(root, "limits.jsonl");
-  const report = { timestamp: "2026-10-29T12:02:00.000Z", type: "event_msg", payload: { type: "token_count", info: {
-    last_token_usage: { total_tokens: 5 },
+  // As codex-cli 0.169 writes it: rate_limits beside info, not inside it.
+  const report = { timestamp: "2026-10-29T12:02:00.000Z", type: "event_msg", payload: { type: "token_count",
+    info: { last_token_usage: { total_tokens: 5 } },
     rate_limits: {
       primary: { used_percent: 12.5, window_minutes: 300, resets_at: 1793285913, label: "\u001b[31mevil", nested: { a: 1 } },
       secondary: { used_percent: 3 },
       credits: { balance: "unlimited" },
       prompt: "do not keep",
     },
-  } } };
+  } };
   await writeFile(path, `${JSON.stringify(report)}\n`, "utf8");
   assert.deepEqual((await parseRollout(path)).rateLimits, {
     primary: { used_percent: 12.5, window_minutes: 300, resets_at: 1793285913 },
@@ -1087,7 +1088,7 @@ test("rate limits are reduced to numeric primary/secondary window fields", async
 
 test("a rate-limit window with no numeric fields is omitted, and no windows means null", async (t) => {
   const root = await fixtureRoot(t);
-  const reportWith = (rate_limits) => `${JSON.stringify({ timestamp: "2026-10-29T12:02:00.000Z", type: "event_msg", payload: { type: "token_count", info: { last_token_usage: { total_tokens: 5 }, rate_limits } } })}\n`;
+  const reportWith = (rate_limits) => `${JSON.stringify({ timestamp: "2026-10-29T12:02:00.000Z", type: "event_msg", payload: { type: "token_count", info: { last_token_usage: { total_tokens: 5 } }, rate_limits } })}\n`;
   const some = join(root, "some.jsonl");
   await writeFile(some, reportWith({ primary: { label: "text only", nested: { a: 1 } }, secondary: { used_percent: 3 } }), "utf8");
   assert.deepEqual((await parseRollout(some)).rateLimits, { secondary: { used_percent: 3 } });

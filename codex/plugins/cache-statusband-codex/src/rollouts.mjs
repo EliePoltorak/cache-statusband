@@ -138,6 +138,9 @@ function consume(item, summary, fromHead = false) {
   }
 
   if (item?.type !== "event_msg" || payload?.type !== "token_count") return;
+  // Codex writes rate_limits beside info in the token_count payload (seen in codex-cli 0.169
+  // transcripts); a report can carry limits with no info.
+  summary.rateLimits = safeRateLimits(payload.rate_limits ?? payload.rateLimits) ?? summary.rateLimits;
   const info = payload.info;
   if (!info) return;
   const last = info.last_token_usage ?? info.lastTokenUsage;
@@ -146,7 +149,6 @@ function consume(item, summary, fromHead = false) {
   summary.contextUsed = number(last?.total_tokens ?? last?.totalTokens) ?? summary.contextUsed;
   summary.contextWindow = number(info.model_context_window ?? info.modelContextWindow) ?? summary.contextWindow;
   summary.totalUsage = usage(total) ?? summary.totalUsage;
-  summary.rateLimits = safeRateLimits(info.rate_limits ?? info.rateLimits) ?? summary.rateLimits;
 }
 
 function safeRateLimits(value) {

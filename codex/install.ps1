@@ -69,12 +69,14 @@ function Write-RestrictedCopy([string]$Path, [byte[]]$Bytes, [string]$Permission
 # fails it warns and the replace goes ahead. ([IO.File]::Replace would keep the destination's
 # attributes but leaves a window in which the file is missing, measured in round 8.)
 $script:nativeMoveWarned = $false
-function Move-FileOverExisting([string]$Source, [string]$Destination) {
+function Move-FileOverExisting([string]$Source, [string]$Destination, [switch]$KeepSourcePermissions) {
   if (-not $IsWindows) {
     Move-Item -LiteralPath $Source -Destination $Destination -Force
     return
   }
-  if (Test-Path -LiteralPath $Destination -PathType Leaf) {
+  # -KeepSourcePermissions: the source was written by Write-RestrictedCopy and already carries the
+  # permissions it should have; the destination's may be broader (Codex rewrites config.toml).
+  if (-not $KeepSourcePermissions -and (Test-Path -LiteralPath $Destination -PathType Leaf)) {
     try {
       $acl = Get-Acl -LiteralPath $Source
       $acl.SetSecurityDescriptorSddlForm((Get-Acl -LiteralPath $Destination).GetSecurityDescriptorSddlForm("Access"), "Access")
@@ -166,8 +168,8 @@ function Write-FileBytesAtomically([string]$Path, [string]$What, [byte[]]$Bytes)
   $target = Resolve-ReplaceTarget $Path $What
   $candidate = Join-Path (Split-Path -Parent $target) (".$(Split-Path -Leaf $target).cache-statusband-" + [guid]::NewGuid().ToString("N") + ".tmp")
   try {
-    [IO.File]::WriteAllBytes($candidate, $Bytes)
-    Move-FileOverExisting $candidate $target
+    Write-RestrictedCopy $candidate $Bytes $(if (Test-Path -LiteralPath $target -PathType Leaf) { $target } else { $null })
+    Move-FileOverExisting $candidate $target -KeepSourcePermissions
   } finally {
     if (Test-Path -LiteralPath $candidate) { Remove-Item -LiteralPath $candidate -Force }
   }
@@ -660,9 +662,11 @@ try {
     $configTarget = Resolve-ReplaceTarget $configPath "config.toml"
     $configCandidate = Join-Path (Split-Path -Parent $configTarget) (".config.toml.cache-statusband-" + [guid]::NewGuid().ToString("N") + ".tmp")
     try {
-      [IO.File]::WriteAllText($configCandidate, $configText, [Text.UTF8Encoding]::new($false))
+      # Codex's own registration rewrites config.toml and so drops an explicit permission entry; the
+      # backup still carries the original file's permissions, so those are what the result gets.
+      Write-RestrictedCopy $configCandidate ([Text.UTF8Encoding]::new($false).GetBytes($configText)) $(if ($backupConfig) { $backupConfig } else { $configTarget })
       if (Test-SameText (Read-TextOrNull $configPath) $registeredConfigText) {
-        Move-FileOverExisting $configCandidate $configTarget
+        Move-FileOverExisting $configCandidate $configTarget -KeepSourcePermissions
         $replaced = $true
       }
     } finally {
@@ -703,8 +707,8 @@ try {
         $restoreTarget = Resolve-ReplaceTarget $configPath "config.toml"
         $restoreCandidate = Join-Path (Split-Path -Parent $restoreTarget) (".config.toml.cache-statusband-" + [guid]::NewGuid().ToString("N") + ".tmp")
         try {
-          Copy-Item -LiteralPath $backupConfig -Destination $restoreCandidate
-          Move-FileOverExisting $restoreCandidate $restoreTarget
+          Write-RestrictedCopy $restoreCandidate ([IO.File]::ReadAllBytes($backupConfig)) $backupConfig
+          Move-FileOverExisting $restoreCandidate $restoreTarget -KeepSourcePermissions
         } finally {
           if (Test-Path -LiteralPath $restoreCandidate) { Remove-Item -LiteralPath $restoreCandidate -Force }
         }
