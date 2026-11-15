@@ -498,13 +498,16 @@ async function runHookDisposal(t, deadline, direct, allowance) {
   // One preload for every node process of this test (NODE_OPTIONS reaches the hook and the server):
   //  * the hook (argv[1] is session-start.mjs) records the pid of each launch of CODEX_BIN, and when
   //    that child exits, in SPAWN_LOG; and has process.exit wrapped: marker first, 6 s wait, exit;
-  //  * the copy named codex.exe writes its pid and then blocks the main thread for good.
+  //  * the copy named codex.exe writes its pid and then blocks the main thread for 30 s, then exits
+  //    (longer than the test waits, and no test kills a server by pid: once stopped, its pid may be
+  //    reused by an unrelated process).
   const preload = join(root, "test-preload.cjs");
   await writeFile(preload, [
     'const fs = require("node:fs");',
     'if (/codex\\.exe$/i.test(process.execPath)) {',
     '  fs.writeFileSync(process.env.HUNG_PID_FILE, String(process.pid));',
-    '  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);',
+    '  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30000);',
+    '  process.exit(0);',
     '}',
     'if (/session-start\\.mjs$/i.test(process.argv[1] || "")) {',
     '  const childProcess = require("node:child_process");',
@@ -600,7 +603,7 @@ async function runHookDisposal(t, deadline, direct, allowance) {
     assert.doesNotThrow(() => JSON.parse(stdout), `the hook printed invalid JSON: ${stdout}`);
     return "checked";
   } finally {
-    for (const pid of pids) if (alive(pid)) process.kill(pid);
+    // A server still running ends itself within 30 s; it is never killed by pid here.
     if (child.exitCode === null) child.kill();
   }
 }
@@ -641,8 +644,8 @@ exec "${process.execPath}" "${hung}" "$@"
     // 2500ms or more.
     assert.ok(afterInput < 2_300, `the hook took ${afterInput}ms after its input arrived, against a 2500ms deadline that began 2000ms earlier`);
   } finally {
-    const pid = Number(await readFile(pidFile, "utf8").catch(() => ""));
-    if (Number.isFinite(pid) && pid > 0) { try { process.kill(pid); } catch {} }
+    // The hook stopped the server before it exited; its pid may already belong to another process,
+    // so it is not signalled (a server left running ends itself within 30 s).
   }
 });
 

@@ -89,13 +89,12 @@ test("disposeAllAppServers waits for the cleanup a finished reader already start
     return fake;
   };
   // A server that never answers and ends by itself after a few seconds (the killer is faked,
-  // so the test ends the real process itself, by the pid it started).
+  // so the test ends the real process itself, through the handle of the process it started).
   const idle = { command: process.execPath, args: ["-e", "process.stdin.resume(); setTimeout(() => process.exit(0), 4000)"] };
-  let pid;
+  let server;
   const spawnImpl = (...spawnArguments) => {
-    const child = spawn(...spawnArguments);
-    pid = child.pid;
-    return child;
+    server = spawn(...spawnArguments);
+    return server;
   };
   try {
     await assert.rejects(readAccountViaAppServer({ codexHome: root, ...idle, spawnImpl, platform: "win32", spawnKiller, timeoutMs: 200 }), /timed out/);
@@ -105,6 +104,8 @@ test("disposeAllAppServers waits for the cleanup a finished reader already start
     await disposeAllAppServers({ waitMs: 2_000, platform: "win32", spawnKiller });
     assert.equal(killerFinished, true);
   } finally {
-    if (pid) { try { process.kill(pid); } catch { /* already gone */ } }
+    // Through the child's own handle, which does nothing once Node has seen it exit, never by a
+    // bare pid that may since belong to another process.
+    if (server && server.exitCode === null && server.signalCode === null) { try { server.kill(); } catch { /* already gone */ } }
   }
 });

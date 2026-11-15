@@ -411,7 +411,19 @@ function Test-CodexConfig {
     $env:CODEX_HOME = $previousCodexHome
     if (Test-Path -LiteralPath $validationHome) {
       $resolved = (Resolve-Path -LiteralPath $validationHome).Path
-      if ($resolved -eq $validationHome) { [IO.Directory]::Delete($resolved, $true) }
+      if ($resolved -eq $validationHome) {
+        # Cleanup must never replace the validation's own result: a file Codex or a scanner still
+        # holds open is retried briefly, then the folder is left behind with a warning.
+        for ($attempt = 1; ; $attempt++) {
+          try { [IO.Directory]::Delete($resolved, $true); break } catch {
+            if ($attempt -ge 5) {
+              Write-Warning "Could not remove the temporary validation folder $resolved ($($_.Exception.Message)); it holds a copy of config.toml and can be deleted by hand."
+              break
+            }
+            Start-Sleep -Milliseconds 200
+          }
+        }
+      }
     }
   }
 }

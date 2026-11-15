@@ -464,17 +464,15 @@ for (const npmShape of process.platform === "win32" ? [false, true] : [false]) {
       await assert.rejects(reader({ codexHome: root, env, timeoutMs: 1500, expectedEmail: FAKE_EMAIL, ...options }), /timed out/);
       const pid = Number(await readFile(pidFile, "utf8"));
       assert.ok(Number.isInteger(pid) && pid > 0);
-      try {
-        assert.ok(await waitUntil(() => !alive(pid), 5_000), "the hung server was left running");
-      } finally {
-        if (alive(pid)) process.kill(pid);
-      }
+      // Never killed by pid here: once stopped, its pid may be reused; a server left running ends
+      // itself within 30 s.
+      assert.ok(await waitUntil(() => !alive(pid), 5_000), "the hung server was left running");
     });
   }
 
   test(`a process that timed out on a hung Codex exits promptly (${shape})`, async (t) => {
     const root = await fixtureRoot(t);
-    const { pidFile, env, options } = await hungLaunch(root, { npmShape });
+    const { env, options } = await hungLaunch(root, { npmShape });
     const script = join(root, "call-reader.mjs");
     await writeFile(script, [
       `import { fetchRateLimitsViaAppServer } from ${JSON.stringify(pathToFileURL(USAGE_MODULE).href)};`,
@@ -486,13 +484,10 @@ for (const npmShape of process.platform === "win32" ? [false, true] : [false]) {
     const gaveUp = new Promise((resolve) => setTimeout(() => resolve("hung"), 8_000));
     const outcome = await Promise.race([exited, gaveUp]);
     if (outcome === "hung") child.kill();
-    try {
-      assert.notEqual(outcome, "hung", "the process was held open by the abandoned server");
-      assert.ok(Date.now() - started < 5_000);
-    } finally {
-      const pid = Number(await readFile(pidFile, "utf8").catch(() => 0));
-      if (pid && alive(pid)) process.kill(pid);
-    }
+    // The server is not killed by pid: the reader stopped it, so its pid may be reused (a server
+    // left running ends itself within 30 s).
+    assert.notEqual(outcome, "hung", "the process was held open by the abandoned server");
+    assert.ok(Date.now() - started < 5_000);
   });
 }
 

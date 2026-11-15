@@ -5,4 +5,6 @@ import { writeFileSync } from "node:fs";
 // that started from one that was killed or never launched.
 if (process.env.HUNG_PID_FILE) writeFileSync(process.env.HUNG_PID_FILE, String(process.pid));
 process.stdin.resume();
-setInterval(() => {}, 1000);
+// It ends itself after 30 s, longer than any test waits for it, so no test has to kill it by pid:
+// once the code under test has stopped it, its pid may be reused by an unrelated process.
+setTimeout(() => process.exit(0), 30_000);
