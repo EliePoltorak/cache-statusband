@@ -425,8 +425,11 @@ function Test-CodexConfig {
   $previousCodexHome = $env:CODEX_HOME
   $previousNoCurrentFolder = $env:NoDefaultCurrentDirectoryInExePath
   try {
-    $liveConfig = Get-Variable -Name configPath -Scope Script -ValueOnly -ErrorAction SilentlyContinue
-    Write-RestrictedCopy (Join-Path $validationHome "config.toml") ([Text.UTF8Encoding]::new($false).GetBytes($Text)) $liveConfig
+    # Codex's own registration rewrites config.toml and drops an explicit permission entry, so once
+    # the backup exists it, not the live file, carries the original file's permissions.
+    $backupCopy = Get-Variable -Name backupConfig -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    $permissionSource = if ($backupCopy) { $backupCopy } else { Get-Variable -Name configPath -Scope Script -ValueOnly -ErrorAction SilentlyContinue }
+    Write-RestrictedCopy (Join-Path $validationHome "config.toml") ([Text.UTF8Encoding]::new($false).GetBytes($Text)) $permissionSource
     $env:CODEX_HOME = $validationHome
     # npm's codex.cmd runs a bare "node", which cmd.exe would look for in the current PowerShell location first.
     $env:NoDefaultCurrentDirectoryInExePath = "1"

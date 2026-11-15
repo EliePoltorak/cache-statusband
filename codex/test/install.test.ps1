@@ -299,7 +299,10 @@ status_line_use_colors = false
     # installer replaces it). The entry must still come back: it is taken from the backup.
     $aclBin = Join-Path $testHome "acl-bin"
     New-Item -ItemType Directory -Path $aclBin | Out-Null
-    [IO.File]::WriteAllText((Join-Path $aclBin "codex.cmd"), "@echo off`r`nif /i ""%1""==""plugin"" (`r`n  type ""%CODEX_HOME%\config.toml"" > ""%CODEX_HOME%\rewrite.tmp""`r`n  del ""%CODEX_HOME%\config.toml""`r`n  move /y ""%CODEX_HOME%\rewrite.tmp"" ""%CODEX_HOME%\config.toml"" >nul`r`n)`r`nexit /b 0`r`n", [Text.Encoding]::ASCII)
+    # Each config check (`app-server`) also records its throwaway copy's access list, so the test
+    # can see that every validation copy, before and after registration, carries the explicit entry.
+    $aclChecks = Join-Path $testHome "acl-checks.txt"
+    [IO.File]::WriteAllText((Join-Path $aclBin "codex.cmd"), "@echo off`r`nif /i ""%1""==""app-server"" (`r`n  icacls ""%CODEX_HOME%\config.toml"" >> ""$aclChecks""`r`n  echo ---END--->> ""$aclChecks""`r`n)`r`nif /i ""%1""==""plugin"" (`r`n  type ""%CODEX_HOME%\config.toml"" > ""%CODEX_HOME%\rewrite.tmp""`r`n  del ""%CODEX_HOME%\config.toml""`r`n  move /y ""%CODEX_HOME%\rewrite.tmp"" ""%CODEX_HOME%\config.toml"" >nul`r`n)`r`nexit /b 0`r`n", [Text.Encoding]::ASCII)
     $previousPath = $env:PATH
     try {
       $env:PATH = "$aclBin$([IO.Path]::PathSeparator)$previousPath"
@@ -317,6 +320,15 @@ status_line_use_colors = false
       $_.AccessControlType -eq "Allow" -and -not $_.IsInherited
     }).Count -eq 1
     if (-not $backupHasGuest) { throw "The config.toml backup did not get the original file's access list" }
+    # Every validation copy, including those checked after Codex's registration rewrote config.toml,
+    # carries the original file's access list. icacls names Guests in the machine's language, so the
+    # entry is matched by its SID-resolved name.
+    $guestsName = $guests.Translate([Security.Principal.NTAccount]).Value.Split("\")[-1]
+    $checkBlocks = @(([IO.File]::ReadAllText($aclChecks) -split "---END---") | Where-Object { $_.Trim() })
+    if ($checkBlocks.Count -lt 2) { throw "The access-entry install ran fewer than two config checks: $($checkBlocks.Count)" }
+    foreach ($block in $checkBlocks) {
+      if ($block -notmatch [regex]::Escape($guestsName) + ':\(R') { throw "A validation copy of config.toml did not get the original file's access list:`n$block" }
+    }
     # A failure to copy the access list warns (once per replace) and the replace still happens.
     $aclFailScript = Join-Path $testHome "acl-fail.ps1"
     $aclMoveDefinition = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq "Move-FileOverExisting" }, $true)
