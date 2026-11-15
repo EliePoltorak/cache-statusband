@@ -270,7 +270,7 @@ export function codexHomeIsMissing(home, stat = statSync) {
 export function resolveCodexLaunch(env = process.env, platform = process.platform, args = ["app-server"]) {
   const windows = platform === "win32";
   // Windows users often keep the quotes around a path with spaces; strip them as PATH entries are.
-  const configured = (windows ? String(env.CODEX_BIN || "").trim().replace(/^"|"$/g, "") : env.CODEX_BIN) || null;
+  const configured = (windows ? String(env.CODEX_BIN || "").trim().replace(/^"|"$/g, "").trim() : env.CODEX_BIN) || null;
   let target = configured;
   // A CODEX_BIN with no folder in it ("codex.exe", "codex") is a name to look up on PATH, the way
   // it always was, but only in full-path PATH entries: never the current folder.
@@ -362,7 +362,7 @@ function findOnWindowsPath(env, name = "codex") {
   const base = ownExtension ? name.slice(0, name.lastIndexOf(".")) : name;
   const extensions = ownExtension ? [name.slice(name.lastIndexOf("."))] : [".exe", ".cmd", ".bat"];
   const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path");
-  const directories = String(pathKey ? env[pathKey] : "").split(delimiter).map((value) => value.trim().replace(/^"|"$/g, "")).filter(Boolean);
+  const directories = String(pathKey ? env[pathKey] : "").split(delimiter).map((value) => value.trim().replace(/^"|"$/g, "").trim()).filter(Boolean);
   let refused = null;
   for (const directory of directories) {
     // A relative PATH entry (".", say) names the current folder, which is exactly where a planted

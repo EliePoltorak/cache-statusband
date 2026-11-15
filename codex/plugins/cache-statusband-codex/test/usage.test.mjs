@@ -401,6 +401,7 @@ test("resolves a runnable Codex command from CODEX_BIN or the Windows PATH", { s
   // folder (the open project, for the hooks), so it is refused. Quotes around a full path are not
   // part of it.
   assert.equal(resolveCodexLaunch({ CODEX_BIN: ' "C:\\Program Files\\Codex\\codex.exe" ' }, "win32").command, "C:\\Program Files\\Codex\\codex.exe");
+  assert.equal(resolveCodexLaunch({ CODEX_BIN: '" C:\\Program Files\\Codex\\codex.exe "' }, "win32").command, "C:\\Program Files\\Codex\\codex.exe");
   for (const relativeBin of ["tools\\codex.cmd", ".\\codex.exe", "./codex.exe", "C:codex.exe", "\\codex.exe"]) {
     assert.throws(() => resolveCodexLaunch({ CODEX_BIN: relativeBin, PATH: other }, "win32"), /not a full path/, relativeBin);
   }
