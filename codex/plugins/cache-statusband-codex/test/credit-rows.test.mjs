@@ -161,3 +161,12 @@ test("a reset title that is not text is shown as its row number, never thrown or
     assert.match(text, /Reset 1 — expires/);
   }
 });
+
+test("with no available resets, rows dropped for another status are still disclosed", () => {
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const lines = formatUsageLines({ availableCount: 0, credits: [], creditsNotAvailable: 1, fetchedAt: now, source: "live" }, now, { includeResetDetails: true });
+  assert.equal(lines[1], "  1 reset row with another status not shown.");
+  assert.equal(lines.filter((line) => line.startsWith("  ")).length, 1);
+  const none = formatUsageLines({ availableCount: 0, credits: [], creditsNotAvailable: 0, fetchedAt: now, source: "live" }, now, { includeResetDetails: true });
+  assert.equal(none.filter((line) => line.startsWith("  ")).length, 0);
+});

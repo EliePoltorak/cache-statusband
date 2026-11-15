@@ -35,6 +35,12 @@ export function formatUsageLines(snapshot, now = Date.now(), {
       .sort((a, b) => a - b);
     const expiry = expiries.length ? `; next expires in ${formatDuration(expiries[0] - now)}` : "";
     lines.push(`Banked resets: ${snapshot.availableCount}${expiry}${checkedSuffix(snapshot, now)}`);
+    // With none available there are no expirations to list, but rows dropped for another
+    // status are still disclosed, as the README promises whenever any were dropped.
+    const droppedForStatus = Number.isFinite(snapshot.creditsNotAvailable) ? Math.max(0, snapshot.creditsNotAvailable) : 0;
+    if (includeResetDetails && !(snapshot.availableCount > 0) && droppedForStatus > 0) {
+      lines.push(`  ${droppedForStatus} reset row${droppedForStatus === 1 ? "" : "s"} with another status not shown.`);
+    }
     if (includeResetDetails && snapshot.availableCount > 0) {
       const credits = Array.isArray(snapshot.credits) ? [...snapshot.credits] : [];
       credits.sort((a, b) => (epochMilliseconds(a.expiresAt) ?? Number.POSITIVE_INFINITY) - (epochMilliseconds(b.expiresAt) ?? Number.POSITIVE_INFINITY));
