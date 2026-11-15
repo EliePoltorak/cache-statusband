@@ -1298,3 +1298,28 @@ test("two captures of one email in different capitalisation share one cache and 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("identities and caches saved before keys were case-folded are adopted under the folded key", async () => {
+  const root = await mkdtemp(join(tmpdir(), "csb-email-old-"));
+  try {
+    const mixed = TEST_EMAIL.replace(/^p/, "P");
+    const oldIdentity = { key: `account:${mixed}`, label: mixed, unavailable: false };
+    // A session recorded by an older build loads with its key folded.
+    await getSessionIdentity(root, "old-session", async () => oldIdentity);
+    const loaded = await getSessionIdentity(root, "old-session", async () => { throw new Error("must not capture"); });
+    assert.equal(loaded.key, `account:${TEST_EMAIL}`);
+    assert.equal(loaded.label, mixed);
+    // A cache an older build wrote under the unfolded key still holds the deadline.
+    const now = Date.parse("2026-10-29T12:00:00.000Z");
+    let calls = 0;
+    const fetcher = async () => { calls += 1; return { ...RAW, account: { email: mixed } }; };
+    await getUsageSnapshot({ codexHome: root, now, fetcher, env: {}, identity: oldIdentity });
+    assert.equal(calls, 1);
+    const again = await getUsageSnapshot({ codexHome: root, now: now + 1_000, fetcher, env: {}, identity: loaded });
+    assert.equal(again.source, "cache");
+    assert.equal(again.identityKey, loaded.key);
+    assert.equal(calls, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

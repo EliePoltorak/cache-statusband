@@ -225,7 +225,7 @@ export async function captureUsageIdentity(codexHome, {
     }
     return null;
   }
-  if (!email || again !== email) return fail("The Codex account changed while the seat was being confirmed");
+  if (!email || !sameEmail(again, email)) return fail("The Codex account changed while the seat was being confirmed");
   return { key: accountKey(email), label: seat.label, unavailable: false };
 }
 
@@ -764,7 +764,13 @@ async function readScopedCache(path, legacyPath, identity) {
   const scoped = await readCache(path);
   if (scoped || path === legacyPath) return scoped;
   const legacy = await readCache(legacyPath);
-  if (legacy?.identityKey === identity?.key) return legacy;
+  // Files written before account keys were case-folded carry the email's capitals, so they are
+  // matched without regard to case and adopted under today's key.
+  if (sameKey(legacy?.identityKey, identity?.key)) return { ...legacy, identityKey: identity.key };
+  if (identity?.label && !identity.label.startsWith("Seat ") && `account:${identity.label}` !== identity.key) {
+    const unfolded = await readCache(join(dirname(path), `rate-limits${cacheSuffix({ key: `account:${identity.label}` })}.json`));
+    if (sameKey(unfolded?.identityKey, identity.key)) return { ...unfolded, identityKey: identity.key };
+  }
   if (!identity?.label?.startsWith("Seat ")) return null;
   const oldIdentity = { key: `seat:${identity.label.slice(5)}` };
   const oldPath = join(dirname(path), `rate-limits${cacheSuffix(oldIdentity)}.json`);
@@ -831,6 +837,10 @@ function safeText(value) {
 // The label keeps the email as Codex reported it.
 function accountKey(email) {
   return `account:${email.toLowerCase()}`;
+}
+
+function sameKey(a, b) {
+  return typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
 }
 
 function sameEmail(a, b) {

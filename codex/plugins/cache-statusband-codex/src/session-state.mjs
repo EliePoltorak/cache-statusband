@@ -93,7 +93,9 @@ function parseIdentity(text) {
       || hasControl(value.label) || value.unavailable !== false) {
     throw new Error("Invalid session identity");
   }
-  return { key: value.key, label: value.label, unavailable: false };
+  // Keys saved before account keys were case-folded keep their capitals; fold them on load so
+  // a resumed session shares the cache, lock and deadline of today's captures.
+  return { key: `account:${value.key.slice(8).toLowerCase()}`, label: value.label, unavailable: false };
 }
 
 export async function saveSessionState(codexHome, sessionId, summary, savedAt = Date.now(), { renameImpl } = {}) {
