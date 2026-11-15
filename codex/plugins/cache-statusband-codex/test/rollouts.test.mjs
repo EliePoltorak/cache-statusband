@@ -459,7 +459,7 @@ test("the SessionStart hook process prints its answer and exits", async () => {
 // over a second to start a server behind a slow cmd shim. (With under 3.5 s left, the usage read
 // that follows only reads the cache.)
 // On Windows the 400ms variant launches the hung server WITHOUT cmd.exe (a copy of node.exe named
-// codex.exe, held by a preload that writes the pid and then blocks the main thread for good, so the
+// codex.exe, held by a preload that writes the pid and then blocks the main thread for 30 s before exiting, so the
 // hung server really hangs and node never tries to load the app-server arguments as a script):
 // the hook kills at a moment when cmd.exe may be starting its child, and taskkill /T's snapshot of
 // the tree can miss a grandchild born in that instant. The real Codex app-server exits when its

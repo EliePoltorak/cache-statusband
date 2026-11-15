@@ -719,31 +719,33 @@ exit /b 0
   if ($bracketRan -ne (Join-Path $bracketRoot "plugins\cache-statusband-codex")) { throw "npm link ran in '$bracketRan', not in the plugin folder of the wildcard-named checkout" }
   Remove-Variable -Name CacheStatusbandTestLinkDir -Scope Global -ErrorAction SilentlyContinue
 
-  # A checkout path holding a character cmd.exe treats as syntax ("&" here, with no space so
+  # A checkout path holding a character cmd.exe treats as syntax ("&" and "!" here, with no space so
   # PowerShell does not quote it) is refused before anything is touched when codex is a .cmd.
-  $ampRoot = Join-Path $testHome "R&D\codex"
-  New-Item -ItemType Directory -Path (Split-Path -Parent $ampRoot) | Out-Null
-  Copy-Item -LiteralPath $root -Destination $ampRoot -Recurse
-  $ampBin = Join-Path $testHome "amp-bin"
-  New-Item -ItemType Directory -Path $ampBin | Out-Null
-  $ampCalled = Join-Path $testHome "amp-codex-called.txt"
-  [IO.File]::WriteAllText((Join-Path $ampBin "codex.cmd"), "@echo off`r`necho %*>>`"$ampCalled`"`r`nexit /b 0`r`n", [Text.Encoding]::ASCII)
-  $ampHome = Join-Path $testHome "amp-home"
-  $ampMessage = ""
-  $previousPath = $env:PATH
-  try {
-    $env:PATH = "$ampBin$([IO.Path]::PathSeparator)$env:SystemRoot/System32"
+  foreach ($ampFolder in @("R&D", "R!D")) {
+    $ampRoot = Join-Path $testHome "$ampFolder\codex"
+    New-Item -ItemType Directory -Path (Split-Path -Parent $ampRoot) | Out-Null
+    Copy-Item -LiteralPath $root -Destination $ampRoot -Recurse
+    $ampBin = Join-Path $testHome "$ampFolder-bin"
+    New-Item -ItemType Directory -Path $ampBin | Out-Null
+    $ampCalled = Join-Path $testHome "$ampFolder-called.txt"
+    [IO.File]::WriteAllText((Join-Path $ampBin "codex.cmd"), "@echo off`r`necho %*>>`"$ampCalled`"`r`nexit /b 0`r`n", [Text.Encoding]::ASCII)
+    $ampHome = Join-Path $testHome "$ampFolder-home"
+    $ampMessage = ""
+    $previousPath = $env:PATH
     try {
-      & (Join-Path $ampRoot "install.ps1") -CodexHome $ampHome -SkipCliLink 3>$null | Out-Null
-    } catch {
-      $ampMessage = $_.Exception.Message
+      $env:PATH = "$ampBin$([IO.Path]::PathSeparator)$env:SystemRoot/System32"
+      try {
+        & (Join-Path $ampRoot "install.ps1") -CodexHome $ampHome -SkipCliLink 3>$null | Out-Null
+      } catch {
+        $ampMessage = $_.Exception.Message
+      }
+    } finally {
+      $env:PATH = $previousPath
     }
-  } finally {
-    $env:PATH = $previousPath
+    if ($ampMessage -notmatch "cmd.exe would misread" -or $ampMessage -notmatch "Nothing was changed") { throw "A checkout path with '$ampFolder' was not refused for codex.cmd: '$ampMessage'" }
+    if (Test-Path -LiteralPath $ampCalled) { throw "codex.cmd was run although the checkout path was refused" }
+    if (Test-Path -LiteralPath (Join-Path $ampHome "config.toml")) { throw "config.toml was written although the checkout path was refused" }
   }
-  if ($ampMessage -notmatch "cmd.exe would misread" -or $ampMessage -notmatch "Nothing was changed") { throw "A checkout path with '&' was not refused for codex.cmd: '$ampMessage'" }
-  if (Test-Path -LiteralPath $ampCalled) { throw "codex.cmd was run although the checkout path was refused" }
-  if (Test-Path -LiteralPath (Join-Path $ampHome "config.toml")) { throw "config.toml was written although the checkout path was refused" }
 
   # An error while running `npm link` that is not "npm was not found" may have come from npm
   # itself, so it is reported as a failure with its message; only a missing command is "could

@@ -459,10 +459,17 @@ for (const npmShape of process.platform === "win32" ? [false, true] : [false]) {
   const shape = npmShape ? "an npm-style codex.cmd" : "a plain executable";
   for (const [name, reader] of [["account", readAccountViaAppServer], ["rate-limit", fetchRateLimitsViaAppServer]]) {
     test(`a timed-out ${name} read leaves no server behind (${shape})`, async (t) => {
-      const root = await fixtureRoot(t);
-      const { pidFile, env, options } = await hungLaunch(root, { npmShape });
-      await assert.rejects(reader({ codexHome: root, env, timeoutMs: 1500, expectedEmail: FAKE_EMAIL, ...options }), /timed out/);
-      const pid = Number(await readFile(pidFile, "utf8"));
+      // On a loaded machine a cold node start can take longer than the 1.5 s read deadline, so the
+      // server is stopped before it writes its pid: nothing is left running, but nothing was
+      // tested either. Try again, up to three times, until a server is seen starting.
+      let pid = 0;
+      for (let attempt = 1; attempt <= 3 && !pid; attempt += 1) {
+        const root = await fixtureRoot(t);
+        const { pidFile, env, options } = await hungLaunch(root, { npmShape });
+        await assert.rejects(reader({ codexHome: root, env, timeoutMs: 1500, expectedEmail: FAKE_EMAIL, ...options }), /timed out/);
+        pid = Number(await readFile(pidFile, "utf8").catch(() => "0"));
+      }
+      assert.ok(pid, "the hung server never started (no pid file) in three runs");
       assert.ok(Number.isInteger(pid) && pid > 0);
       // Never killed by pid here: once stopped, its pid may be reused; a server left running ends
       // itself within 30 s.

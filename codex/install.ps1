@@ -473,10 +473,10 @@ $configPath = Join-Path $CodexHome "config.toml"
 $codexCommand = Get-Command codex -All -ErrorAction Stop | Where-Object { $_.CommandType -eq "Application" } | Select-Object -First 1 -ExpandProperty Source
 if (-not $codexCommand) { throw "The Codex CLI executable was not found on PATH" }
 # npm installs Codex as codex.cmd, which PowerShell runs through cmd.exe. cmd.exe reads % & ^ | < >
-# in an argument as its own syntax (%VAR% even inside quotes), so the checkout path given to
+# in an argument as its own syntax (%VAR% even inside quotes; ! too when delayed expansion is on), so the checkout path given to
 # `codex plugin marketplace add` would arrive cut or changed. Refuse before anything is touched.
-if ($codexCommand -match '\.(cmd|bat)$' -and $repositoryRoot -match '[%&^|<>]') {
-  throw "Cannot register this checkout through ${codexCommand}: cmd.exe would misread the characters % & ^ | < > in its path ($repositoryRoot). Move the checkout to a folder whose path has none of them, or put codex.exe ahead of codex.cmd on PATH. Nothing was changed."
+if ($codexCommand -match '\.(cmd|bat)$' -and $repositoryRoot -match '[%&^|<>!]') {
+  throw "Cannot register this checkout through ${codexCommand}: cmd.exe would misread the characters % & ^ | < > ! in its path ($repositoryRoot). Move the checkout to a folder whose path has none of them, or put codex.exe ahead of codex.cmd on PATH. Nothing was changed."
 }
 
 if (-not (Test-Path -LiteralPath $pluginRoot -PathType Container)) {
