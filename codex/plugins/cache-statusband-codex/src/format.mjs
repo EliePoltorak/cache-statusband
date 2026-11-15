@@ -174,7 +174,9 @@ function compactMinutes(minutes) {
 
 function epochMilliseconds(value) {
   if (!Number.isFinite(value)) return null;
-  return value < 10_000_000_000 ? value * 1000 : value;
+  const milliseconds = value < 10_000_000_000 ? value * 1000 : value;
+  // Past the largest date JavaScript can hold (8.64e15 ms), formatting would throw: no date.
+  return Math.abs(milliseconds) <= 8.64e15 ? milliseconds : null;
 }
 
 function trim(value) {

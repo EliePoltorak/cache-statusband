@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, relative, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -20,6 +20,7 @@ import {
   MIN_POLL_INTERVAL_MS,
   readAccountViaAppServer,
   resolveCodexLaunch,
+  windowsSystemExe,
   retryAfterMilliseconds,
   sanitizeRateLimits,
 } from "../src/usage.mjs";
@@ -381,6 +382,13 @@ test("resolves a runnable Codex command from CODEX_BIN or the Windows PATH", asy
   // With no ComSpec, cmd.exe by full path (a bare name would be looked for in the current folder first).
   assert.equal(resolveCodexLaunch({ PATH: `${bin}${delimiter}${other}` }, "win32").command, "C:\\Windows\\System32\\cmd.exe");
   assert.equal(resolveCodexLaunch({ PATH: bin, SystemRoot: "D:\\Win" }, "win32").command, "D:\\Win\\System32\\cmd.exe");
+  // Names are matched case-insensitively, and only a full path is trusted as a root or a ComSpec.
+  assert.equal(resolveCodexLaunch({ PATH: bin, SYSTEMROOT: "D:\\Win" }, "win32").command, "D:\\Win\\System32\\cmd.exe");
+  for (const root of [".", "C:", "\\Windows", "Windows"]) {
+    assert.equal(resolveCodexLaunch({ PATH: bin, SystemRoot: root }, "win32").command, "C:\\Windows\\System32\\cmd.exe", root);
+  }
+  assert.equal(resolveCodexLaunch({ PATH: bin, ComSpec: "cmd.exe" }, "win32").command, "C:\\Windows\\System32\\cmd.exe");
+  assert.equal(windowsSystemExe("taskkill.exe", { systemroot: "E:\\W" }), "E:\\W\\System32\\taskkill.exe");
   // A relative PATH entry resolves against the current folder, so it is never searched.
   if (process.platform === "win32") {
     assert.throws(() => resolveCodexLaunch({ PATH: relative(process.cwd(), other) }, "win32"), (error) => error.code === "ENOENT");
@@ -945,7 +953,9 @@ test("local dates use a plain space before AM/PM", () => {
 
 async function fixtureRoot(t) {
   const root = await mkdtemp(join(tmpdir(), "cache-statusband-usage-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  // Retried: a just-stopped server (or the cmd.exe that ran it from a fixture folder) can hold a
+  // folder or file here for a moment.
+  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   return root;
 }
 
@@ -1172,4 +1182,34 @@ test("a cached reading of the wrong shape is no reading, and never makes the out
     assert.equal(snapshot.availableCount, null, JSON.stringify(bad));
     assert.doesNotThrow(() => formatUsageLines(snapshot, now, { includeResetDetails: true, locale: "en-US", timeZone: "UTC" }));
   }
+});
+
+test("an npm codex.cmd never runs a node.exe planted in the caller's folder", { skip: process.platform !== "win32" && "Windows only" }, async (t) => {
+  const root = await fixtureRoot(t);
+  const bin = join(root, "npm-bin");
+  const project = join(root, "project");
+  const marker = join(root, "ran-with.txt");
+  await mkdir(bin);
+  await mkdir(project);
+  // The server records which node ran it, then exits (the read fails; only who ran matters).
+  const server = join(root, "record-exec.mjs");
+  await writeFile(server, `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, process.execPath);\n`);
+  // npm's own template: a node.exe beside the wrapper, else a bare "node".
+  await writeFile(join(bin, "codex.cmd"), `@ECHO off\r\nSETLOCAL\r\nSET dp0=%~dp0\r\nIF EXIST "%dp0%\\node.exe" (SET "_prog=%dp0%\\node.exe") ELSE (SET "_prog=node")\r\n"%_prog%" "${server}" %*\r\n`);
+  // The planted copy is a real node, so it would run the script too and record its own path.
+  const planted = join(project, "node.exe");
+  await copyFile(process.execPath, planted);
+  const script = join(root, "call-reader.mjs");
+  await writeFile(script, [
+    `import { readAccountViaAppServer } from ${JSON.stringify(pathToFileURL(USAGE_MODULE).href)};`,
+    `try { await readAccountViaAppServer({ codexHome: ${JSON.stringify(root)}, timeoutMs: 5000 }); } catch (error) { console.log(error.message); }`,
+  ].join("\n"));
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === "path" || key.toLowerCase() === "nodefaultcurrentdirectoryinexepath" || key.toLowerCase() === "codex_bin") delete env[key];
+  }
+  env.Path = `${bin}${delimiter}${dirname(process.execPath)}${delimiter}${windowsSystemExe("", process.env)}`;
+  const { stdout } = await promisify(execFile)(process.execPath, [script], { cwd: project, env, windowsHide: true, timeout: 20_000 });
+  const ranWith = await readFile(marker, "utf8").catch(() => assert.fail(`the server never ran: ${stdout}`));
+  assert.notEqual(ranWith.toLowerCase(), planted.toLowerCase(), "the planted node.exe in the caller's folder ran");
 });

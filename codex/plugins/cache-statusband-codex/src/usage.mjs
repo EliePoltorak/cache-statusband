@@ -283,10 +283,14 @@ export function resolveCodexLaunch(env = process.env, platform = process.platfor
     }
     const line = [`"${target}"`, ...args].join(" ");
     return {
-      command: env.ComSpec || windowsSystemExe("cmd.exe", env),
+      command: absoluteOrNull(envValue(env, "ComSpec")) || windowsSystemExe("cmd.exe", env),
       // /v:off: delayed expansion would treat "!" in a path as a variable reference.
       args: ["/d", "/v:off", "/s", "/c", `"${line}"`],
       windowsVerbatimArguments: true,
+      // npm's codex.cmd runs a bare "node" when no node.exe sits beside it, and cmd.exe looks for a
+      // bare name in its working folder first. So the wrapper runs from its own folder (which it
+      // already checks first for node.exe), never from the caller's project or terminal folder.
+      cwd: win32.dirname(target),
     };
   }
   return { command: target, args };
@@ -295,7 +299,21 @@ export function resolveCodexLaunch(env = process.env, platform = process.platfor
 // A Windows system program by its full path. Windows looks for a bare name in the current folder
 // before PATH, so "taskkill" or "cmd.exe" could run a copy planted in an opened project.
 export function windowsSystemExe(name, env = process.env) {
-  return win32.join(env.SystemRoot || env.windir || "C:\\Windows", "System32", name);
+  const root = absoluteOrNull(envValue(env, "SystemRoot")) || absoluteOrNull(envValue(env, "windir")) || "C:\\Windows";
+  return win32.join(root, "System32", name);
+}
+
+// Windows environment names are case-insensitive, but a copied env object is not (Git Bash
+// exports SYSTEMROOT, for one).
+function envValue(env, name) {
+  const key = Object.keys(env).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+  return key ? env[key] : undefined;
+}
+
+// Only a full path with a drive or a share ("C:\x", "\\server\x"): a relative, drive-relative or
+// rooted-without-drive path would resolve against the current folder or drive.
+function absoluteOrNull(value) {
+  return typeof value === "string" && /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/])/.test(value) ? value : null;
 }
 
 // A .cmd/.bat wrapper in a directory whose name contains % cannot be run safely through
@@ -308,7 +326,7 @@ function findOnWindowsPath(env) {
   for (const directory of directories) {
     // A relative PATH entry (".", say) names the current folder, which is exactly where a planted
     // codex.exe would sit; only absolute folders are searched.
-    if (!win32.isAbsolute(directory)) continue;
+    if (!absoluteOrNull(directory)) continue;
     for (const extension of [".exe", ".cmd", ".bat"]) {
       const candidate = join(directory, `codex${extension}`);
       try {
@@ -316,7 +334,9 @@ function findOnWindowsPath(env) {
       } catch (error) {
         // A Store app's App Execution Alias (a reparse point under WindowsApps) refuses stat with
         // EACCES but launches fine; accept it when the link itself is there and is not a folder.
-        if (!(extension === ".exe" && error?.code === "EACCES" && isLaunchableAlias(candidate))) continue;
+        // Only in a WindowsApps folder, where Store aliases live: elsewhere an unreadable file is
+        // skipped, so a usable codex later on PATH is still found.
+        if (!(extension === ".exe" && error?.code === "EACCES" && win32.basename(directory).toLowerCase() === "windowsapps" && isLaunchableAlias(candidate))) continue;
       }
       if (extension !== ".exe" && candidate.includes("%")) refused ??= candidate;
       else return candidate;
@@ -432,11 +452,14 @@ async function readAccountSession({
   const launch = command === undefined
     ? resolveCodexLaunch(env, platform, args)
     : { command, args: args ?? ["app-server"] };
+  // cmd.exe also honours this, as a second guard against running a program from its working folder.
+  if (launch.cwd) childEnv.NoDefaultCurrentDirectoryInExePath = "1";
   const child = spawnImpl(launch.command, launch.args, {
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
     ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+    ...(launch.cwd ? { cwd: launch.cwd } : {}),
   });
   liveChildren.add(child);
   const lines = createInterface({ input: child.stdout });
@@ -517,11 +540,14 @@ export async function fetchRateLimitsViaAppServer({
   const launch = command === undefined
     ? resolveCodexLaunch(env, platform, args)
     : { command, args: args ?? ["app-server"] };
+  // cmd.exe also honours this, as a second guard against running a program from its working folder.
+  if (launch.cwd) childEnv.NoDefaultCurrentDirectoryInExePath = "1";
   const child = spawnImpl(launch.command, launch.args, {
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
     ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+    ...(launch.cwd ? { cwd: launch.cwd } : {}),
   });
   liveChildren.add(child);
   const lines = createInterface({ input: child.stdout });

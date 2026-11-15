@@ -149,3 +149,8 @@ test("a reset title read back from the cache is cleaned of control characters be
   assert.doesNotMatch(text, /[\u001b\u202e]/);
   assert.match(text, /Bad \[31m Title/);
 });
+
+test("an expiry past the largest JavaScript date is shown as not supplied, not thrown", () => {
+  const text = details({ credits: [{ title: "Far", expiresAt: 1e20 }], availableCount: 1, source: "cache", fetchedAt: NOW });
+  assert.match(text, /Far — expiration not supplied/);
+});
