@@ -154,7 +154,8 @@ function warnIfCodexUnlaunchable() {
 }
 
 // A cache that cannot be written means no usage was read at all; say so on stderr (once per
-// command), which also covers --json, whose stdout carries only the snapshot.
+// command), which also covers --json, whose stdout carries only the snapshot. It is decided on
+// the PRESENTED snapshot, so a run blanked for its seat says nothing, as its stdout does.
 function warnIfCacheUnwritable(snapshot) {
   const line = cacheUnwritableLine(snapshot);
   if (line) process.stderr.write(`cache-statusband-codex: ${line}\n`);

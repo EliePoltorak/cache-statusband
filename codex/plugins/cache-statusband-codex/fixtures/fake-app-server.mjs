@@ -1,4 +1,4 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 if (process.env.EXPECT_CODEX_HOME && process.env.CODEX_HOME !== process.env.EXPECT_CODEX_HOME) {
@@ -31,6 +31,9 @@ lines.on("line", (line) => {
     process.stdout.write(`${JSON.stringify({ id: message.id, result: { account } })}\n`);
   }
   if (message.id === 3) {
+    // FAKE_SERVER_SEAT_FILE / FAKE_SERVER_SEAT_TEXT rewrite a seat file during the usage read,
+    // which comes after the account was captured: a seat that changes mid-run.
+    if (process.env.FAKE_SERVER_SEAT_FILE) writeFileSync(process.env.FAKE_SERVER_SEAT_FILE, process.env.FAKE_SERVER_SEAT_TEXT ?? "");
     process.stdout.write(`${JSON.stringify({
       id: 3,
       result: {

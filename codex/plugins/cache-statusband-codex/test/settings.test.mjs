@@ -52,7 +52,7 @@ test("an unreadable or malformed settings.json fails closed instead of meaning n
   assert.equal(shown.snapshot.creditsNotAvailable, null);
 });
 
-test("a seat that became unavailable after this run captured it shows nothing; a resume keeps its record", async (t) => {
+test("a seat that changed after this run captured it (unavailable, relabelled, appeared or removed) shows nothing; a resume keeps its record", async (t) => {
   // The run captured "Seat A" while the seat was available; by presentation time it is not.
   const root = await homeWith(t, undefined);
   await mkdir(join(root, "cache-statusband-codex", "settings.json"));
@@ -63,7 +63,7 @@ test("a seat that became unavailable after this run captured it shows nothing; a
   assert.equal(now.snapshot.availableCount, null);
   assert.equal(now.snapshot.credits, null);
   assert.equal(now.snapshot.accountEmail, null);
-  assert.equal(now.snapshot.fetchedAt, null);
+  for (const key of ["fetchedAt", "attemptedAt", "nextAllowedAt", "lastErrorAt"]) assert.equal(now.snapshot[key], null, key);
   assert.equal(now.snapshot.source, "identity-unavailable");
   // It prints exactly what a seat unavailable from the start prints: no age, no cache note.
   assert.deepEqual(formatUsageLines(now.snapshot, Date.now(), { identity: now.identity }), ["Banked resets: unavailable"]);

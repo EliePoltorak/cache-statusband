@@ -1186,6 +1186,30 @@ test("usage --json and board --json omit the email and account key when a seat i
   assert.equal(plain.accountEmail, email);
 });
 
+test("usage and board show nothing when the seat changes after the account was captured", async (t) => {
+  const root = await fixtureRoot(t);
+  const cli = cliRunner(root);
+  const seat = join(root, "seat.txt");
+  for (const after of ["", "beta"]) {
+    for (const args of [["usage"], ["usage", "--json"], ["board"], ["board", "--json"]]) {
+      await writeFile(seat, "alpha");
+      // A fresh cache each time, so every run makes its own usage read.
+      await rm(join(root, "cache-statusband-codex"), { recursive: true, force: true });
+      const { stdout } = await cli.runWithStderr(args, { CACHE_STATUSBAND_CODEX_SEAT_FILE: seat, FAKE_SERVER_SEAT_FILE: seat, FAKE_SERVER_SEAT_TEXT: after });
+      const label = `${args.join(" ")} -> "${after}"`;
+      assert.doesNotMatch(stdout, /Seat alpha|Seat beta|example\.invalid|Checked/, label);
+      if (args.includes("--json")) {
+        const usage = JSON.parse(stdout).usage ?? JSON.parse(stdout);
+        assert.equal(usage.source, "identity-unavailable", label);
+        assert.equal(usage.availableCount, null, label);
+        assert.equal(usage.fetchedAt, null, label);
+      } else {
+        assert.equal(stdout.split(/\r?\n/)[0], "Banked resets: unavailable", label);
+      }
+    }
+  }
+});
+
 test("the CLI says once, on stderr, that no usage was read when the cache cannot be written", async (t) => {
   const root = await fixtureRoot(t);
   const email = ["test", "example.invalid"].join("@");
