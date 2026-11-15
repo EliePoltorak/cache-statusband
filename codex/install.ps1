@@ -398,7 +398,7 @@ function Test-CodexConfig {
   try {
     [IO.File]::WriteAllText((Join-Path $validationHome "config.toml"), $Text, [Text.UTF8Encoding]::new($false))
     $env:CODEX_HOME = $validationHome
-    # npm's codex.cmd runs a bare "node", which cmd.exe would look for in this folder first.
+    # npm's codex.cmd runs a bare "node", which cmd.exe would look for in the current PowerShell location first.
     $env:NoDefaultCurrentDirectoryInExePath = "1"
     try {
       $checkArguments = @("app-server") + $(if ($Strict) { @("--strict-config") } else { @() }) + @("--print-startup-config")
@@ -560,7 +560,7 @@ try {
   $previousNoCurrentFolder = $env:NoDefaultCurrentDirectoryInExePath
   try {
     $env:CODEX_HOME = $CodexHome
-    # npm's codex.cmd runs a bare "node", which cmd.exe would look for in this folder first.
+    # npm's codex.cmd runs a bare "node", which cmd.exe would look for in the current PowerShell location first.
     $env:NoDefaultCurrentDirectoryInExePath = "1"
     # Codex refuses to add a marketplace name that is already registered from another folder.
     # So the add is tried first, and only that refusal triggers a re-point: the old registration
@@ -718,7 +718,14 @@ if (-not $SkipCliLink) {
   }
   $reuseExistingLink = $false
   try {
-    $npmRoot = (& npm root -g 2>$null | Select-Object -Last 1)
+    $previousNoCurrentFolder = $env:NoDefaultCurrentDirectoryInExePath
+    try {
+      # npm.cmd also runs a bare "node"; never take it from the current PowerShell location.
+      $env:NoDefaultCurrentDirectoryInExePath = "1"
+      $npmRoot = (& npm root -g 2>$null | Select-Object -Last 1)
+    } finally {
+      $env:NoDefaultCurrentDirectoryInExePath = $previousNoCurrentFolder
+    }
     if ($LASTEXITCODE -eq 0 -and $npmRoot) {
       $globalPackage = Join-Path ([string]$npmRoot).Trim() "cache-statusband-codex"
       if (Test-Path -LiteralPath $globalPackage) {

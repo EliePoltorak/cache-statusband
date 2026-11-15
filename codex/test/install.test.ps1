@@ -404,6 +404,7 @@ exit /b 1
   New-Item -ItemType Directory -Path $fakeBin | Out-Null
   $fakeCodex = @'
 @echo off
+echo [%NoDefaultCurrentDirectoryInExePath%]>> "GUARD_LOG"
 if "%1"=="app-server" exit /b 0
 if "%1"=="plugin" if "%2"=="marketplace" (
   echo [marketplaces.partial]>> "%CODEX_HOME%\config.toml"
@@ -411,12 +412,18 @@ if "%1"=="plugin" if "%2"=="marketplace" (
 )
 exit /b 0
 '@
+  # Every Codex call carries the guard that stops cmd.exe searching the current folder for npm's
+  # bare "node", and the caller's own value of that variable is put back afterwards.
+  $guardLog = Join-Path $testHome "guard-log.txt"
+  $fakeCodex = $fakeCodex.Replace("GUARD_LOG", $guardLog)
   [IO.File]::WriteAllText((Join-Path $fakeBin "codex.cmd"), $fakeCodex, [Text.Encoding]::ASCII)
   $restoreHome = Join-Path $testHome "restore-home"
   New-Item -ItemType Directory -Path $restoreHome | Out-Null
   $original = "[history]`npersistence = `"save-all`"`n"
   [IO.File]::WriteAllText((Join-Path $restoreHome "config.toml"), $original, [Text.UTF8Encoding]::new($false))
   $previousPath = $env:PATH
+  $previousGuard = $env:NoDefaultCurrentDirectoryInExePath
+  $env:NoDefaultCurrentDirectoryInExePath = "caller-value"
   $rejected = $false
   try {
     $env:PATH = "$fakeBin$([IO.Path]::PathSeparator)$previousPath"
@@ -428,6 +435,11 @@ exit /b 0
   } finally {
     $env:PATH = $previousPath
   }
+  $guardAfter = $env:NoDefaultCurrentDirectoryInExePath
+  $env:NoDefaultCurrentDirectoryInExePath = $previousGuard
+  if ($guardAfter -ne "caller-value") { throw "The installer did not put back the caller's NoDefaultCurrentDirectoryInExePath: '$guardAfter'" }
+  $guardLines = @(Get-Content -LiteralPath $guardLog)
+  if ($guardLines.Count -lt 2 -or @($guardLines | Where-Object { $_.Trim() -ne "[1]" }).Count -ne 0) { throw "A Codex call ran without NoDefaultCurrentDirectoryInExePath=1: $($guardLines -join ', ')" }
   if (-not $rejected) { throw "A failed registration was not reported" }
   if ([IO.File]::ReadAllText((Join-Path $restoreHome "config.toml")) -ne $original) {
     throw "The original config.toml was not restored after a failed registration"

@@ -166,6 +166,14 @@ test("speaks the documented app-server protocol", async () => {
     env: { ...process.env, EXPECT_CODEX_HOME: selectedHome },
   });
   assert.equal(fromRelative.rateLimitResetCredits.availableCount, 2);
+  const account = await readAccountViaAppServer({
+    codexHome: relative(process.cwd(), selectedHome),
+    command: process.execPath,
+    args: [join(here, "..", "fixtures", "fake-app-server.mjs")],
+    timeoutMs: 2_000,
+    env: { ...process.env, EXPECT_CODEX_HOME: selectedHome },
+  });
+  assert.equal(account.email, ["test", "example.invalid"].join("@"));
 });
 
 test("keeps usage polling and presentation scoped to the captured seat", async (t) => {
@@ -412,6 +420,8 @@ test("resolves a runnable Codex command from CODEX_BIN or the Windows PATH", { s
   // part of it.
   assert.equal(resolveCodexLaunch({ CODEX_BIN: ' "C:\\Program Files\\Codex\\codex.exe" ' }, "win32").command, "C:\\Program Files\\Codex\\codex.exe");
   assert.equal(resolveCodexLaunch({ CODEX_BIN: '" C:\\Program Files\\Codex\\codex.exe "' }, "win32").command, "C:\\Program Files\\Codex\\codex.exe");
+  // A PATH entry is unquoted and trimmed the same way, spaces inside its quotes included.
+  assert.equal(resolveCodexLaunch({ PATH: `" ${other} "` }, "win32").command, join(other, "codex.exe"));
   for (const relativeBin of ["tools\\codex.cmd", ".\\codex.exe", "./codex.exe", "C:codex.exe", "\\codex.exe"]) {
     assert.throws(() => resolveCodexLaunch({ CODEX_BIN: relativeBin, PATH: other }, "win32"), /not a full path/, relativeBin);
   }
