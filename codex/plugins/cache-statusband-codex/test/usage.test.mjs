@@ -1323,3 +1323,51 @@ test("identities and caches saved before keys were case-folded are adopted under
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a seat session keeps the unfolded key, so an older build's cache and backoff still apply", async () => {
+  const root = await mkdtemp(join(tmpdir(), "csb-email-seat-old-"));
+  try {
+    const mixed = TEST_EMAIL.replace(/^p/, "P");
+    const folded = `account:${TEST_EMAIL}`;
+    const oldIdentity = { key: `account:${mixed}`, label: "Seat A", unavailable: false };
+    // Resumed: the record an older build saved still names the cache it wrote.
+    await getSessionIdentity(root, "seat-old", async () => oldIdentity);
+    const resumed = await getSessionIdentity(root, "seat-old", async () => { throw new Error("must not capture"); });
+    assert.equal(resumed.key, folded);
+    assert.equal(resumed.unfoldedKey, `account:${mixed}`);
+    const now = Date.parse("2026-10-29T12:00:00.000Z");
+    let calls = 0;
+    const fetcher = async () => { calls += 1; return { ...RAW, account: { email: mixed } }; };
+    await getUsageSnapshot({ codexHome: root, now, fetcher, env: {}, identity: oldIdentity });
+    assert.equal(calls, 1);
+    const again = await getUsageSnapshot({ codexHome: root, now: now + 1_000, fetcher, env: {}, identity: resumed });
+    assert.equal(again.source, "cache");
+    assert.equal(again.identityKey, folded);
+    assert.equal(calls, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a shared legacy cache written under a capitalised key is adopted under the folded key", async () => {
+  const root = await mkdtemp(join(tmpdir(), "csb-email-legacy-"));
+  try {
+    const mixed = TEST_EMAIL.replace(/^p/, "P");
+    const now = Date.parse("2026-10-29T12:00:00.000Z");
+    let calls = 0;
+    const fetcher = async () => { calls += 1; return { ...RAW, account: { email: mixed } }; };
+    // Write a cache under the capitalised key, then move it to the shared legacy name.
+    await getUsageSnapshot({ codexHome: root, now, fetcher, env: {}, identity: { key: `account:${mixed}`, label: mixed, unavailable: false } });
+    const dir = join(root, "cache-statusband-codex");
+    const written = (await readdir(dir)).find((name) => /^rate-limits-.*\.json$/.test(name));
+    await writeFile(join(dir, "rate-limits.json"), await readFile(join(dir, written), "utf8"), "utf8");
+    await rm(join(dir, written));
+    const identity = { key: `account:${TEST_EMAIL}`, label: TEST_EMAIL, unavailable: false };
+    const adopted = await getUsageSnapshot({ codexHome: root, now: now + 1_000, fetcher, env: {}, identity });
+    assert.equal(adopted.source, "cache");
+    assert.equal(adopted.identityKey, identity.key);
+    assert.equal(calls, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

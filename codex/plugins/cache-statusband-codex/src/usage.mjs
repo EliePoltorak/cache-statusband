@@ -200,7 +200,7 @@ export async function captureUsageIdentity(codexHome, {
     // email (an API key, say) is a different answer: someone IS signed in, but usage is
     // read per ChatGPT account, so there is nothing to read it for.
     if (!email && account != null) return fail("The signed-in Codex login has no ChatGPT account email", noEmailFlags(account));
-    return email ? { key: accountKey(email), label: email, unavailable: false } : null;
+    return email ? withUnfoldedKey({ key: accountKey(email), label: email, unavailable: false }, email) : null;
   }
   // A seat label asserts which login this session runs under, so a signed-out reading is
   // not an answer. The login is read twice on ONE app-server connection, with the seat file
@@ -226,7 +226,7 @@ export async function captureUsageIdentity(codexHome, {
     return null;
   }
   if (!email || !sameEmail(again, email)) return fail("The Codex account changed while the seat was being confirmed");
-  return { key: accountKey(email), label: seat.label, unavailable: false };
+  return withUnfoldedKey({ key: accountKey(email), label: seat.label, unavailable: false }, email);
 }
 
 function noEmailFlags(account) {
@@ -767,8 +767,8 @@ async function readScopedCache(path, legacyPath, identity) {
   // Files written before account keys were case-folded carry the email's capitals, so they are
   // matched without regard to case and adopted under today's key.
   if (sameKey(legacy?.identityKey, identity?.key)) return { ...legacy, identityKey: identity.key };
-  if (identity?.label && !identity.label.startsWith("Seat ") && `account:${identity.label}` !== identity.key) {
-    const unfolded = await readCache(join(dirname(path), `rate-limits${cacheSuffix({ key: `account:${identity.label}` })}.json`));
+  if (identity?.unfoldedKey && identity.unfoldedKey !== identity.key) {
+    const unfolded = await readCache(join(dirname(path), `rate-limits${cacheSuffix({ key: identity.unfoldedKey })}.json`));
     if (sameKey(unfolded?.identityKey, identity.key)) return { ...unfolded, identityKey: identity.key };
   }
   if (!identity?.label?.startsWith("Seat ")) return null;
@@ -837,6 +837,13 @@ function safeText(value) {
 // The label keeps the email as Codex reported it.
 function accountKey(email) {
   return `account:${email.toLowerCase()}`;
+}
+
+// The key an older build would have used, kept so its cache file can still be found; it is
+// carried only when it differs from the folded key.
+function withUnfoldedKey(identity, email) {
+  const unfolded = `account:${email}`;
+  return unfolded === identity.key ? identity : { ...identity, unfoldedKey: unfolded };
 }
 
 function sameKey(a, b) {

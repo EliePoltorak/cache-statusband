@@ -95,7 +95,9 @@ function parseIdentity(text) {
   }
   // Keys saved before account keys were case-folded keep their capitals; fold them on load so
   // a resumed session shares the cache, lock and deadline of today's captures.
-  return { key: `account:${value.key.slice(8).toLowerCase()}`, label: value.label, unavailable: false };
+  const key = `account:${value.key.slice(8).toLowerCase()}`;
+  const saved = typeof value.unfoldedKey === "string" && value.unfoldedKey.toLowerCase() === key ? value.unfoldedKey : value.key;
+  return saved === key ? { key, label: value.label, unavailable: false } : { key, label: value.label, unavailable: false, unfoldedKey: saved };
 }
 
 export async function saveSessionState(codexHome, sessionId, summary, savedAt = Date.now(), { renameImpl } = {}) {
