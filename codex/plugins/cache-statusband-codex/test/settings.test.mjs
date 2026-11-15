@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 import { configuredSeatFile, configuredSeatIdentity, readSeatLabel, usagePresentation } from "../src/settings.mjs";
+import { formatUsageLines } from "../src/format.mjs";
 
 const EMAIL = ["test", "example.invalid"].join("@");
 
@@ -56,17 +57,34 @@ test("a seat that became unavailable after this run captured it shows nothing; a
   const root = await homeWith(t, undefined);
   await mkdir(join(root, "cache-statusband-codex", "settings.json"));
   const captured = { key: `account:${EMAIL}`, label: "Seat A", unavailable: false };
-  const reading = { accountEmail: EMAIL, availableCount: 2, credits: [], creditsOmitted: 0, creditsNotAvailable: 0, identityKey: `account:${EMAIL}`, source: "live" };
+  const reading = { version: 3, accountEmail: EMAIL, availableCount: 2, credits: [], creditsOmitted: 0, creditsNotAvailable: 0, identityKey: `account:${EMAIL}`, source: "live", fetchedAt: Date.now() - 180_000, cacheUnwritable: true, cacheDir: "C:\\x" };
   const now = await usagePresentation(reading, { codexHome: root, env: {}, identity: captured, current: true });
   assert.equal(now.identity, null);
   assert.equal(now.snapshot.availableCount, null);
   assert.equal(now.snapshot.credits, null);
-  assert.equal(now.snapshot.accountEmail, undefined);
+  assert.equal(now.snapshot.accountEmail, null);
+  assert.equal(now.snapshot.fetchedAt, null);
   assert.equal(now.snapshot.source, "identity-unavailable");
+  // It prints exactly what a seat unavailable from the start prints: no age, no cache note.
+  assert.deepEqual(formatUsageLines(now.snapshot, Date.now(), { identity: now.identity }), ["Banked resets: unavailable"]);
   // A resumed session's recorded identity is history: its seat label and reading stay.
   const resumed = await usagePresentation(reading, { codexHome: root, env: {}, identity: captured });
   assert.equal(resumed.identity, "Seat A");
   assert.equal(resumed.snapshot.availableCount, 2);
+  // The seat state the presentation used is returned, so --json never reads the setting again.
+  assert.equal(now.seatConfigured, true);
+  // A seat now holding a different label than the captured one shows nothing either.
+  const seatFile = join(root, "seat.txt");
+  await writeFile(seatFile, "B\n");
+  const relabelled = await usagePresentation(reading, { codexHome: root, env: { CACHE_STATUSBAND_CODEX_SEAT_FILE: seatFile }, identity: captured, current: true });
+  assert.equal(relabelled.identity, null);
+  assert.equal(relabelled.snapshot.availableCount, null);
+  assert.deepEqual(formatUsageLines(relabelled.snapshot, Date.now(), { identity: relabelled.identity }), ["Banked resets: unavailable"]);
+  // The same label still shows the reading.
+  await writeFile(seatFile, "A\n");
+  const same = await usagePresentation(reading, { codexHome: root, env: { CACHE_STATUSBAND_CODEX_SEAT_FILE: seatFile }, identity: captured, current: true });
+  assert.equal(same.identity, "Seat A");
+  assert.equal(same.snapshot.availableCount, 2);
 });
 
 test("a malformed settings.json never lets the CLI show or emit the account email", async (t) => {

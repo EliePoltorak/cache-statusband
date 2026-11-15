@@ -236,16 +236,23 @@ test("a resume still shows a recorded seat label, whatever seat is configured no
   const email = ["recorded", "example.invalid"].join("@");
   const recorded = { key: `account:${email}`, label: "Seat first", unavailable: false };
   const seat = join(root, "seat.txt");
-  await writeFile(seat, "second");
+  await writeFile(seat, "first");
   await mkdir(join(root, "cache-statusband-codex"), { recursive: true });
   await writeFile(join(root, "cache-statusband-codex", "settings.json"), JSON.stringify({ version: 1, seatFile: seat }));
-  const output = await handleSessionStart({ source: "startup", session_id: "seat-session" }, {
+  const hooks = {
     codexHome: root,
     identityGetter: async () => recorded,
     usageGetter: async () => ({ identityKey: recorded.key, accountEmail: email, availableCount: 2 }),
-  });
-  assert.match(output.systemMessage, /Seat first\./);
+  };
+  // The session starts under "first", which records it; the seat then moves to "second".
+  assert.match((await handleSessionStart({ source: "startup", session_id: "seat-session" }, hooks)).systemMessage, /Seat first\./);
+  await writeFile(seat, "second");
+  const output = await handleSessionStart({ source: "resume", session_id: "seat-session" }, hooks);
+  assert.match(output.systemMessage, /Started as Seat first\./);
   assert.doesNotMatch(output.systemMessage, /example\.invalid/);
+  // A NEW session whose capture names a seat the file no longer holds shows no seat and no reading.
+  const fresh = await handleSessionStart({ source: "startup", session_id: "other-session" }, hooks);
+  assert.doesNotMatch(fresh.systemMessage ?? "", /Seat first|Banked resets|example\.invalid/);
 });
 
 test("concurrent session starts publish only one complete starting identity", async (t) => {

@@ -55,14 +55,14 @@ async function board(argv) {
   try {
     const identity = await captureIdentityOrSay(home);
     const usageSnapshot = await getUsageSnapshot({ codexHome: home, identity });
-    warnIfCacheUnwritable(usageSnapshot);
     presented = await usagePresentation(usageSnapshot, { codexHome: home, identity, current: true });
+    warnIfCacheUnwritable(presented.snapshot);
   } catch (error) {
     usageKnown = false;
     process.stderr.write(`cache-statusband-codex: usage not read: ${stripControls(error?.message ?? String(error))}\n`);
   }
   if (options.json) {
-    process.stdout.write(`${json({ usage: usageKnown ? await publicSnapshot(presented.snapshot, home) : null, sessions: summaries })}\n`);
+    process.stdout.write(`${json({ usage: usageKnown ? publicSnapshot(presented) : null, sessions: summaries })}\n`);
     return;
   }
   process.stdout.write(`${formatUsageLines(presented.snapshot, Date.now(), { identity: presented.identity }).join(" | ")}\n\n`);
@@ -90,9 +90,9 @@ async function usage(argv) {
   warnIfCodexUnlaunchable();
   const identity = await captureIdentityOrSay(home);
   const snapshot = await getUsageSnapshot({ codexHome: home, identity });
-  warnIfCacheUnwritable(snapshot);
   const presented = await usagePresentation(snapshot, { codexHome: home, identity, current: true });
-  if (options.json) process.stdout.write(`${json(await publicSnapshot(presented.snapshot, home))}\n`);
+  warnIfCacheUnwritable(presented.snapshot);
+  if (options.json) process.stdout.write(`${json(publicSnapshot(presented))}\n`);
   else process.stdout.write(`${formatUsageLines(presented.snapshot, Date.now(), { includeResetDetails: true, identity: presented.identity }).join("\n")}\n`);
 }
 
@@ -162,9 +162,10 @@ function warnIfCacheUnwritable(snapshot) {
 
 // With a seat configured, available or not, the email is deliberately not shown (a seat
 // label or nothing is the identity), so the machine-readable output must not carry it or
-// its key either, whatever identity was recorded for the session.
-async function publicSnapshot(snapshot, home) {
-  if (!(await configuredSeatIdentity(home))) return snapshot;
+// its key either, whatever identity was recorded for the session. The seat state is the one
+// the presentation read, never a fresh read that could disagree with it.
+function publicSnapshot({ snapshot, seatConfigured }) {
+  if (!seatConfigured) return snapshot;
   const { accountEmail, identityKey, ...rest } = snapshot;
   return rest;
 }

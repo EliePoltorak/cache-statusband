@@ -25,15 +25,38 @@ export async function usagePresentation(snapshot, {
   current = false,
 } = {}) {
   const seat = codexHome ? await configuredSeatIdentity(codexHome, env) : null;
+  // `seatConfigured` is the seat state this presentation was decided on, so a caller (the
+  // --json output) never reads the setting again and reaches a different answer.
+  return { ...presentFor(snapshot, seat, suppliedIdentity, current), seatConfigured: Boolean(seat) };
+}
+
+function presentFor(snapshot, seat, suppliedIdentity, current) {
   // `current`: the supplied identity was captured for THIS run (a CLI run, or a new or forked
   // session), not recorded earlier. If the seat has become unavailable since it was captured,
   // that run shows nothing, as it would had the seat been unavailable from the start. A
   // resumed session's recorded identity is history and is not affected.
-  if (current && seat?.unavailable) {
-    const { accountEmail, identityKey, ...rest } = snapshot ?? {};
+  // Built from an empty shape, not the reading: its times and cache notes belong to an account
+  // this run no longer names, and a seat unavailable from the start shows none of them either.
+  // A seat now holding a different label than the one captured is treated the same way: the
+  // capture refuses a change while it runs, and a change just after it is no different.
+  const relabelled = current && seat && !seat.unavailable && isSeatLabel(suppliedIdentity) && suppliedIdentity.label !== seat.label;
+  if ((current && seat?.unavailable) || relabelled) {
     return {
       identity: null,
-      snapshot: { ...rest, availableCount: null, credits: null, creditsOmitted: null, creditsNotAvailable: null, primary: null, secondary: null, source: "identity-unavailable" },
+      snapshot: {
+        version: snapshot?.version,
+        attemptedAt: null,
+        fetchedAt: null,
+        nextAllowedAt: null,
+        lastErrorAt: null,
+        identityKey: null,
+        accountEmail: null,
+        availableCount: null,
+        credits: null,
+        primary: null,
+        secondary: null,
+        source: "identity-unavailable",
+      },
     };
   }
   const identity = suppliedIdentity === undefined ? seat : suppliedIdentity;
