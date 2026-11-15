@@ -763,14 +763,15 @@ function wellFormedCache(value) {
 async function readScopedCache(path, legacyPath, identity) {
   const scoped = await readCache(path);
   if (scoped || path === legacyPath) return scoped;
-  const legacy = await readCache(legacyPath);
   // Files written before account keys were case-folded carry the email's capitals, so they are
-  // matched without regard to case and adopted under today's key.
-  if (sameKey(legacy?.identityKey, identity?.key)) return { ...legacy, identityKey: identity.key };
+  // matched without regard to case and adopted under today's key. The per-account file an older
+  // build wrote is newer than the shared one, so it is checked first, as it was then.
   if (identity?.unfoldedKey && identity.unfoldedKey !== identity.key) {
     const unfolded = await readCache(join(dirname(path), `rate-limits${cacheSuffix({ key: identity.unfoldedKey })}.json`));
     if (sameKey(unfolded?.identityKey, identity.key)) return { ...unfolded, identityKey: identity.key };
   }
+  const legacy = await readCache(legacyPath);
+  if (sameKey(legacy?.identityKey, identity?.key)) return { ...legacy, identityKey: identity.key };
   if (!identity?.label?.startsWith("Seat ")) return null;
   const oldIdentity = { key: `seat:${identity.label.slice(5)}` };
   const oldPath = join(dirname(path), `rate-limits${cacheSuffix(oldIdentity)}.json`);
@@ -836,7 +837,7 @@ function safeText(value) {
 // captures that differ only in an email's capitalisation share one cache, lock and deadline.
 // The label keeps the email as Codex reported it.
 function accountKey(email) {
-  return `account:${email.toLowerCase()}`;
+  return `account:${foldAscii(email)}`;
 }
 
 // The key an older build would have used, kept so its cache file can still be found; it is
@@ -846,12 +847,18 @@ function withUnfoldedKey(identity, email) {
   return unfolded === identity.key ? identity : { ...identity, unfoldedKey: unfolded };
 }
 
+// Only ASCII capitals are folded: full Unicode case mapping would merge distinct addresses
+// (the Kelvin sign lower-cases to "k").
+function foldAscii(text) {
+  return text.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+}
+
 function sameKey(a, b) {
-  return typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
+  return typeof a === "string" && typeof b === "string" && foldAscii(a) === foldAscii(b);
 }
 
 function sameEmail(a, b) {
-  return typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
+  return typeof a === "string" && typeof b === "string" && foldAscii(a) === foldAscii(b);
 }
 
 function safeEmail(value) {

@@ -1371,3 +1371,43 @@ test("a shared legacy cache written under a capitalised key is adopted under the
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("an older build's per-account cache wins over the older shared file, so its backoff holds", async () => {
+  const root = await mkdtemp(join(tmpdir(), "csb-email-both-"));
+  try {
+    const mixed = TEST_EMAIL.replace(/^p/, "P");
+    const unfolded = { key: `account:${mixed}`, label: mixed, unavailable: false };
+    const now = Date.parse("2026-10-29T12:00:00.000Z");
+    let calls = 0;
+    const fetcher = async () => { calls += 1; return { ...RAW, account: { email: mixed } }; };
+    const dir = join(root, "cache-statusband-codex");
+    // The oldest build's shared file: an old reading, long stale.
+    await getUsageSnapshot({ codexHome: root, now: now - 3 * 86_400_000, fetcher, env: {}, identity: unfolded });
+    const perAccount = (await readdir(dir)).find((name) => /^rate-limits-.*\.json$/.test(name));
+    await writeFile(join(dir, "rate-limits.json"), await readFile(join(dir, perAccount), "utf8"), "utf8");
+    // The next build's per-account file: a recent reading still inside its deadline.
+    await getUsageSnapshot({ codexHome: root, now, fetcher, env: {}, identity: unfolded });
+    assert.equal(calls, 2);
+    const identity = { key: `account:${TEST_EMAIL}`, label: mixed, unavailable: false, unfoldedKey: unfolded.key };
+    const adopted = await getUsageSnapshot({ codexHome: root, now: now + 1_000, fetcher, env: {}, identity });
+    assert.equal(adopted.source, "cache");
+    assert.equal(calls, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("account keys fold ASCII capitals only, so a Kelvin sign is not read as a k", async () => {
+  const root = await mkdtemp(join(tmpdir(), "csb-email-kelvin-"));
+  try {
+    let email = "\u212Aate@example.invalid";
+    const accountReader = async () => ({ email });
+    const kelvin = await captureUsageIdentity(root, { env: {}, accountReader });
+    email = "Kate@example.invalid";
+    const ascii = await captureUsageIdentity(root, { env: {}, accountReader });
+    assert.equal(ascii.key, "account:kate@example.invalid");
+    assert.notEqual(kelvin.key, ascii.key);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
