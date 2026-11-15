@@ -302,7 +302,8 @@ status_line_use_colors = false
     # Each config check (`app-server`) also records its throwaway copy's access list, so the test
     # can see that every validation copy, before and after registration, carries the explicit entry.
     $aclChecks = Join-Path $testHome "acl-checks.txt"
-    [IO.File]::WriteAllText((Join-Path $aclBin "codex.cmd"), "@echo off`r`nif /i ""%1""==""app-server"" (`r`n  icacls ""%CODEX_HOME%\config.toml"" >> ""$aclChecks""`r`n  echo ---END--->> ""$aclChecks""`r`n)`r`nif /i ""%1""==""plugin"" (`r`n  type ""%CODEX_HOME%\config.toml"" > ""%CODEX_HOME%\rewrite.tmp""`r`n  del ""%CODEX_HOME%\config.toml""`r`n  move /y ""%CODEX_HOME%\rewrite.tmp"" ""%CODEX_HOME%\config.toml"" >nul`r`n)`r`nexit /b 0`r`n", [Text.Encoding]::ASCII)
+    $aclLive = Join-Path $testHome "acl-live.txt"
+    [IO.File]::WriteAllText((Join-Path $aclBin "codex.cmd"), "@echo off`r`nif /i ""%1""==""app-server"" (`r`n  icacls ""%CODEX_HOME%\config.toml"" >> ""$aclChecks""`r`n  echo ---END--->> ""$aclChecks""`r`n  icacls ""$aclConfig"" >> ""$aclLive""`r`n  echo ---END--->> ""$aclLive""`r`n)`r`nif /i ""%1""==""plugin"" (`r`n  type ""%CODEX_HOME%\config.toml"" > ""%CODEX_HOME%\rewrite.tmp""`r`n  del ""%CODEX_HOME%\config.toml""`r`n  move /y ""%CODEX_HOME%\rewrite.tmp"" ""%CODEX_HOME%\config.toml"" >nul`r`n)`r`nexit /b 0`r`n", [Text.Encoding]::ASCII)
     $previousPath = $env:PATH
     try {
       $env:PATH = "$aclBin$([IO.Path]::PathSeparator)$previousPath"
@@ -328,6 +329,11 @@ status_line_use_colors = false
     if ($checkBlocks.Count -lt 2) { throw "The access-entry install ran fewer than two config checks: $($checkBlocks.Count)" }
     foreach ($block in $checkBlocks) {
       if ($block -notmatch [regex]::Escape($guestsName) + ':\(R') { throw "A validation copy of config.toml did not get the original file's access list:`n$block" }
+    }
+    # The live config.toml has its original permissions back by the time the post-registration
+    # checks run, not only after the final replace.
+    foreach ($block in @(([IO.File]::ReadAllText($aclLive) -split "---END---") | Where-Object { $_.Trim() })) {
+      if ($block -notmatch [regex]::Escape($guestsName) + ':\(R') { throw "The live config.toml was left without its original access list while the installer validated:`n$block" }
     }
     # A failure to copy the access list warns (once per replace) and the replace still happens.
     $aclFailScript = Join-Path $testHome "acl-fail.ps1"

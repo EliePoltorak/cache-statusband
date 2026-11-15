@@ -37,18 +37,23 @@ function New-BackupFolder([string]$Name) {
 # access list (Windows) or mode (elsewhere, where .NET offers it) is put on it, and only then are the
 # contents written. If the permissions cannot be copied, nothing is written and the error stops the
 # install.
+# Puts $From's access list (Windows; its DACL, not its owner) or mode (elsewhere, where .NET offers
+# it) on $Path. Throws if that fails.
+function Copy-FilePermissions([string]$Path, [string]$From) {
+  if (-not $From -or -not (Test-Path -LiteralPath $From -PathType Leaf)) { return }
+  if ($IsWindows) {
+    $acl = Get-Acl -LiteralPath $Path
+    $acl.SetSecurityDescriptorSddlForm((Get-Acl -LiteralPath $From).GetSecurityDescriptorSddlForm("Access"), "Access")
+    Set-Acl -LiteralPath $Path -AclObject $acl
+  } elseif ([IO.File].GetMethod("SetUnixFileMode", [type[]]@([string], [IO.UnixFileMode]))) {
+    [IO.File]::SetUnixFileMode($Path, [IO.File]::GetUnixFileMode($From))
+  }
+}
+
 function Write-RestrictedCopy([string]$Path, [byte[]]$Bytes, [string]$PermissionsFrom) {
   [IO.File]::WriteAllBytes($Path, [byte[]]@())
   try {
-    if ($PermissionsFrom -and (Test-Path -LiteralPath $PermissionsFrom -PathType Leaf)) {
-      if ($IsWindows) {
-        $acl = Get-Acl -LiteralPath $Path
-        $acl.SetSecurityDescriptorSddlForm((Get-Acl -LiteralPath $PermissionsFrom).GetSecurityDescriptorSddlForm("Access"), "Access")
-        Set-Acl -LiteralPath $Path -AclObject $acl
-      } elseif ([IO.File].GetMethod("SetUnixFileMode", [type[]]@([string], [IO.UnixFileMode]))) {
-        [IO.File]::SetUnixFileMode($Path, [IO.File]::GetUnixFileMode($PermissionsFrom))
-      }
-    }
+    Copy-FilePermissions $Path $PermissionsFrom
   } catch {
     Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
     throw "Could not give the copy at $Path the permissions of $PermissionsFrom, so nothing was copied: $($_.Exception.Message)"
@@ -559,6 +564,16 @@ $configText = Set-StatusbandPreferences -Text $(if ($null -ne $originalConfigTex
 Assert-CodexConfig -Text $configText -CodexCommand $codexCommand -Original $originalConfigText
 
 $backupConfig = $null
+# Puts the original config.toml's permissions (carried by the backup) back on the live file. A
+# failure warns: the contents are unaffected, and the install's own outcome is reported separately.
+function Restore-ConfigPermissions {
+  if (-not $script:backupConfig -or -not (Test-Path -LiteralPath $configPath -PathType Leaf)) { return }
+  try {
+    Copy-FilePermissions (Resolve-ReplaceTarget $configPath "config.toml") $script:backupConfig
+  } catch {
+    Write-Warning "Could not put the original permissions back on config.toml after Codex rewrote it; they are on the backup at $($script:backupConfig): $($_.Exception.Message)"
+  }
+}
 if (Test-Path -LiteralPath $configPath) {
   $backupRoot = New-BackupFolder "cache-statusband-codex"
   $backupConfig = Join-Path $backupRoot "config.toml"
@@ -626,6 +641,12 @@ try {
   } finally {
     $env:CODEX_HOME = $previousCodexHome
     $env:NoDefaultCurrentDirectoryInExePath = $previousNoCurrentFolder
+    # Codex's registration rewrites config.toml as a new file, which takes its folder's permissions
+    # and drops any stricter ones the original had. Put the original's back at once, whether
+    # registration succeeded or failed, so the live file is not left more readable than it was
+    # while the installer validates or rolls back. (While Codex's own commands run, the file is as
+    # Codex writes it; any Codex command that writes config.toml does the same.)
+    Restore-ConfigPermissions
   }
   # What config.toml holds once Codex has finished registering. Any later read that differs
   # from the previous one is an edit by something else, which a failure must not undo. It is
@@ -704,6 +725,8 @@ try {
     # it is, and the backup is named.
     $liveConfigText = Read-TextOrNull $configPath
     if ($registrationDone -and ($foreignEditSeen -or -not (Test-SameText $liveConfigText $lastSeenConfigText))) {
+      # Its contents are someone else's, but its permissions go back to the original's.
+      Restore-ConfigPermissions
       Write-Warning "Installation failed, and config.toml was changed by something else while the installer ran, so it was not restored. It is left as it is now; your original is at $backupConfig"
     } else {
       try {
