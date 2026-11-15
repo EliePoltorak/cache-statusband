@@ -31,6 +31,31 @@ function New-BackupFolder([string]$Name) {
   return $path
 }
 
+# Writes a copy of a configuration file that is no more readable than the original. A new file
+# only inherits its folder's access list, so a config.toml locked down more tightly than its folder
+# would be readable through a backup or validation copy. The file is created empty, the original's
+# access list (Windows) or mode (elsewhere, where .NET offers it) is put on it, and only then are the
+# contents written. If the permissions cannot be copied, nothing is written and the error stops the
+# install.
+function Write-RestrictedCopy([string]$Path, [byte[]]$Bytes, [string]$PermissionsFrom) {
+  [IO.File]::WriteAllBytes($Path, [byte[]]@())
+  try {
+    if ($PermissionsFrom -and (Test-Path -LiteralPath $PermissionsFrom -PathType Leaf)) {
+      if ($IsWindows) {
+        $acl = Get-Acl -LiteralPath $Path
+        $acl.SetSecurityDescriptorSddlForm((Get-Acl -LiteralPath $PermissionsFrom).GetSecurityDescriptorSddlForm("Access"), "Access")
+        Set-Acl -LiteralPath $Path -AclObject $acl
+      } elseif ([IO.File].GetMethod("SetUnixFileMode", [type[]]@([string], [IO.UnixFileMode]))) {
+        [IO.File]::SetUnixFileMode($Path, [IO.File]::GetUnixFileMode($PermissionsFrom))
+      }
+    }
+  } catch {
+    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    throw "Could not give the copy at $Path the permissions of $PermissionsFrom, so nothing was copied: $($_.Exception.Message)"
+  }
+  [IO.File]::WriteAllBytes($Path, $Bytes)
+}
+
 # Replaces $Destination with $Source in one step, so a reader opening $Destination at any
 # moment finds the old file or the new one and never a missing file. On Windows that is an
 # atomic replace (MoveFileEx with MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
@@ -398,7 +423,8 @@ function Test-CodexConfig {
   $previousCodexHome = $env:CODEX_HOME
   $previousNoCurrentFolder = $env:NoDefaultCurrentDirectoryInExePath
   try {
-    [IO.File]::WriteAllText((Join-Path $validationHome "config.toml"), $Text, [Text.UTF8Encoding]::new($false))
+    $liveConfig = Get-Variable -Name configPath -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    Write-RestrictedCopy (Join-Path $validationHome "config.toml") ([Text.UTF8Encoding]::new($false).GetBytes($Text)) $liveConfig
     $env:CODEX_HOME = $validationHome
     # npm's codex.cmd runs a bare "node", which cmd.exe would look for in the current PowerShell location first.
     $env:NoDefaultCurrentDirectoryInExePath = "1"
@@ -531,7 +557,7 @@ $backupConfig = $null
 if (Test-Path -LiteralPath $configPath) {
   $backupRoot = New-BackupFolder "cache-statusband-codex"
   $backupConfig = Join-Path $backupRoot "config.toml"
-  Copy-Item -LiteralPath $configPath -Destination $backupConfig
+  Write-RestrictedCopy $backupConfig ([IO.File]::ReadAllBytes($configPath)) $configPath
   Write-Host "Backed up config.toml to $backupRoot"
 }
 
@@ -547,7 +573,7 @@ if ($PSBoundParameters.ContainsKey("SeatFile")) {
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $settingsPath) | Out-Null
   if (Test-Path -LiteralPath $settingsPath) {
     $settingsBackupFile = Join-Path (New-BackupFolder "cache-statusband-codex-settings") "settings.json"
-    Copy-Item -LiteralPath $settingsPath -Destination $settingsBackupFile
+    Write-RestrictedCopy $settingsBackupFile ([IO.File]::ReadAllBytes($settingsPath)) $settingsPath
   }
   $settingsWrittenText = (@{ version = 1; seatFile = $expandedSeatFile } | ConvertTo-Json) + "`n"
   Write-FileBytesAtomically $settingsPath "settings.json" ([Text.UTF8Encoding]::new($false).GetBytes($settingsWrittenText))

@@ -308,6 +308,14 @@ status_line_use_colors = false
     }
     if ([IO.File]::ReadAllText($aclConfig) -notmatch '(?m)^hooks = true$') { throw "The access-entry install did not update config.toml" }
     if (-not (& $hasGuestEntry)) { throw "The explicit access entry on config.toml did not survive the install replacing the file" }
+    # The backup copy carries config.toml's own access list, not just its folder's.
+    $aclBackup = Get-ChildItem -LiteralPath (Join-Path $aclHome "backups") -Recurse -Filter "config.toml" | Select-Object -First 1
+    if (-not $aclBackup) { throw "The access-entry install left no config.toml backup" }
+    $backupHasGuest = @((Get-Acl -LiteralPath $aclBackup.FullName).Access | Where-Object {
+      $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $guests.Value -and
+      $_.AccessControlType -eq "Allow" -and -not $_.IsInherited
+    }).Count -eq 1
+    if (-not $backupHasGuest) { throw "The config.toml backup did not get the original file's access list" }
     # A failure to copy the access list warns (once per replace) and the replace still happens.
     $aclFailScript = Join-Path $testHome "acl-fail.ps1"
     $aclMoveDefinition = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq "Move-FileOverExisting" }, $true)
