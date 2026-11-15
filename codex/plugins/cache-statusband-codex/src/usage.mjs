@@ -90,7 +90,10 @@ export async function getUsageSnapshot({
     const { migrateSeatDeadline, ...stored } = cached ?? {};
     return { ...show(cached ? stored : null, aligned.mismatch ? "identity-changed" : "stale"), cacheUnwritable: true, cacheDir: dataDir };
   }
-  if (!lock) return show(cached, aligned.mismatch ? "identity-changed" : "cache-busy");
+  if (!lock) {
+    const { migrateSeatDeadline, ...stored } = cached ?? {};
+    return show(cached ? stored : null, aligned.mismatch ? "identity-changed" : "cache-busy");
+  }
   try {
     aligned = alignCache(await readScopedCache(cachePath, legacyPath, identity), identity);
     cached = aligned.cache;

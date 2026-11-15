@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { chmod, copyFile, mkdtemp, mkdir, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -466,8 +466,9 @@ test("the SessionStart hook process prints its answer and exits", async () => {
 // stdin closes (observed with codex-cli 0.169, about 1.5 s after the hook lets go of its pipes), so
 // in the product a grandchild missed that way exits about 1.5 s after the hook; this fixture
 // ignores stdin EOF, so a test that raced it would report an orphan the product does not leave.
-// The copy of node.exe is run once first so the first-run virus scan of a new executable does not
-// use up the 400ms. The 2500ms variant keeps the codex.cmd shim, where the start is long over by
+// The copy of node.exe is run once first, so the first-run scan of a new executable happens outside
+// the measured run (the server's pid comes from the launch, so its start time no longer decides the
+// result, but a scan inside the run would still slow it). The 2500ms variant keeps the codex.cmd shim, where the start is long over by
 // the kill.
 for (const [deadline, direct, allowance, title] of [
   ["400", true, 5_000, "the hook, at its deadline, stops a Codex app-server whose read is still running (400ms)"],
@@ -556,7 +557,14 @@ async function runHookDisposal(t, deadline, direct, allowance) {
     while (Date.now() < end && !(await condition())) await new Promise((resolve) => setTimeout(resolve, 50));
     return condition();
   };
-  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  // Off Windows a server the hook killed stays a zombie, still answering signal 0, until the hook
+  // reaps it, and the hook is held in its 6 s wait here; a zombie has exited, so it counts as gone.
+  // If ps cannot say, the process counts as alive.
+  const alive = (pid) => {
+    try { process.kill(pid, 0); } catch { return false; }
+    if (process.platform === "win32") return true;
+    try { return !/^Z/.test(execFileSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).trim()); } catch { return true; }
+  };
   const exists = async (path) => (await readFile(path, "utf8").catch(() => "")) !== "";
   let pids = [];
   try {

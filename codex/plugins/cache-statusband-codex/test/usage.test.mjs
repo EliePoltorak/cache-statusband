@@ -272,6 +272,23 @@ test("upgrading a seat-keyed cache preserves its deadline but discards unverifie
   assert.equal(shared.nextAllowedAt, snapshot.nextAllowedAt);
 });
 
+test("a seat-keyed cache found while the usage lock is busy is shown without its migration flag", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const oldKey = `seat:${FIRST_SEAT}`;
+  const dataDir = join(root, "cache-statusband-codex");
+  await mkdir(dataDir, { recursive: true });
+  const hash = (key) => createHash("sha256").update(key).digest("hex").slice(0, 16);
+  await writeFile(join(dataDir, `rate-limits-${hash(oldKey)}.json`), JSON.stringify({ version: 3, identityKey: oldKey, accountEmail: OTHER_EMAIL, availableCount: 6, nextAllowedAt: now + MIN_POLL_INTERVAL_MS }));
+  // Another process holds the new identity's lock (written just now, so it is not stale).
+  await writeFile(join(dataDir, `rate-limits-${hash(ACCOUNT_IDENTITY.key)}.lock`), "someone-else");
+  const identity = { ...ACCOUNT_IDENTITY, label: `${SEAT_PREFIX} ${FIRST_SEAT}` };
+  const snapshot = await getUsageSnapshot({ codexHome: root, now, identity, fetcher: async () => { throw new Error("must not poll while the lock is busy"); } });
+  assert.equal(snapshot.source, "cache-busy");
+  assert.equal("migrateSeatDeadline" in snapshot, false);
+  assert.equal(snapshot.nextAllowedAt, now + MIN_POLL_INTERVAL_MS);
+});
+
 test("captures the account identity once when no seat file is configured", async (t) => {
   const root = await fixtureRoot(t);
   let reads = 0;
