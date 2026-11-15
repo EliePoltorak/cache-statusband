@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { statSync } from "node:fs";
+import { lstatSync, statSync } from "node:fs";
 import { readFile, unlink, writeFile } from "node:fs/promises";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, win32 } from "node:path";
 import { createInterface } from "node:readline";
 import { makeFolder, renameWithRetry } from "./atomic.mjs";
 import { MAX_RETRY_AFTER_MS, retryAfterMilliseconds } from "./retry-after.mjs";
@@ -283,13 +283,19 @@ export function resolveCodexLaunch(env = process.env, platform = process.platfor
     }
     const line = [`"${target}"`, ...args].join(" ");
     return {
-      command: env.ComSpec || "cmd.exe",
+      command: env.ComSpec || windowsSystemExe("cmd.exe", env),
       // /v:off: delayed expansion would treat "!" in a path as a variable reference.
       args: ["/d", "/v:off", "/s", "/c", `"${line}"`],
       windowsVerbatimArguments: true,
     };
   }
   return { command: target, args };
+}
+
+// A Windows system program by its full path. Windows looks for a bare name in the current folder
+// before PATH, so "taskkill" or "cmd.exe" could run a copy planted in an opened project.
+export function windowsSystemExe(name, env = process.env) {
+  return win32.join(env.SystemRoot || env.windir || "C:\\Windows", "System32", name);
 }
 
 // A .cmd/.bat wrapper in a directory whose name contains % cannot be run safely through
@@ -300,18 +306,31 @@ function findOnWindowsPath(env) {
   const directories = String(pathKey ? env[pathKey] : "").split(delimiter).map((value) => value.trim().replace(/^"|"$/g, "")).filter(Boolean);
   let refused = null;
   for (const directory of directories) {
+    // A relative PATH entry (".", say) names the current folder, which is exactly where a planted
+    // codex.exe would sit; only absolute folders are searched.
+    if (!win32.isAbsolute(directory)) continue;
     for (const extension of [".exe", ".cmd", ".bat"]) {
       const candidate = join(directory, `codex${extension}`);
       try {
         if (!statSync(candidate).isFile()) continue;
-      } catch {
-        continue;
+      } catch (error) {
+        // A Store app's App Execution Alias (a reparse point under WindowsApps) refuses stat with
+        // EACCES but launches fine; accept it when the link itself is there and is not a folder.
+        if (!(extension === ".exe" && error?.code === "EACCES" && isLaunchableAlias(candidate))) continue;
       }
       if (extension !== ".exe" && candidate.includes("%")) refused ??= candidate;
       else return candidate;
     }
   }
   return refused;
+}
+
+function isLaunchableAlias(candidate) {
+  try {
+    return !lstatSync(candidate).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 // Every app-server this process has started and not yet finished with. A hook that
@@ -348,7 +367,7 @@ function disposeChild(child, { platform = process.platform, spawnKiller = spawn 
   let finished = Promise.resolve();
   if (!gone && platform === "win32" && Number.isInteger(child.pid)) {
     try {
-      const killer = spawnKiller("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+      const killer = spawnKiller(windowsSystemExe("taskkill.exe"), ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
       const fallback = () => { try { child.kill(); } catch {} };
       finished = new Promise((resolve) => {
         killer.once("error", () => { fallback(); resolve(); });
@@ -651,10 +670,18 @@ function fresh(cache, now) {
 async function readCache(path) {
   try {
     const value = JSON.parse(await readFile(path, "utf8"));
-    return value?.version === CACHE_VERSION ? value : null;
+    return value?.version === CACHE_VERSION && wellFormedCache(value) ? value : null;
   } catch {
     return null;
   }
+}
+
+// The cache is a file anything in the Codex home can write: a record of the wrong shape is no
+// cache at all, rather than something that makes `usage` or `board` throw when it is printed.
+function wellFormedCache(value) {
+  const record = (item) => item == null || (typeof item === "object" && !Array.isArray(item));
+  if (value.credits != null && !(Array.isArray(value.credits) && value.credits.every((item) => item !== null && typeof item === "object" && !Array.isArray(item)))) return false;
+  return record(value.primary) && record(value.secondary);
 }
 
 async function readScopedCache(path, legacyPath, identity) {

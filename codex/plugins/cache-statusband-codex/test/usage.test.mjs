@@ -4,7 +4,7 @@ import { execFile, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, relative, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
@@ -378,7 +378,13 @@ test("resolves a runnable Codex command from CODEX_BIN or the Windows PATH", asy
   assert.deepEqual(wrapped.args, ["/d", "/v:off", "/s", "/c", `""${join(bin, "codex.cmd")}" app-server"`]);
   assert.equal(wrapped.windowsVerbatimArguments, true);
 
-  assert.equal(resolveCodexLaunch({ PATH: `${bin}${delimiter}${other}` }, "win32").command, "cmd.exe");
+  // With no ComSpec, cmd.exe by full path (a bare name would be looked for in the current folder first).
+  assert.equal(resolveCodexLaunch({ PATH: `${bin}${delimiter}${other}` }, "win32").command, "C:\\Windows\\System32\\cmd.exe");
+  assert.equal(resolveCodexLaunch({ PATH: bin, SystemRoot: "D:\\Win" }, "win32").command, "D:\\Win\\System32\\cmd.exe");
+  // A relative PATH entry resolves against the current folder, so it is never searched.
+  if (process.platform === "win32") {
+    assert.throws(() => resolveCodexLaunch({ PATH: relative(process.cwd(), other) }, "win32"), (error) => error.code === "ENOENT");
+  }
   assert.deepEqual(resolveCodexLaunch({ PATH: `${other}${delimiter}${bin}` }, "win32"), { command: join(other, "codex.exe"), args: ["app-server"] });
   assert.equal(resolveCodexLaunch({ PATH: other, CODEX_BIN: join(bin, "codex.cmd"), ComSpec }, "win32").windowsVerbatimArguments, true);
   assert.deepEqual(resolveCodexLaunch({ CODEX_BIN: "/opt/codex" }, "linux"), { command: "/opt/codex", args: ["app-server"] });
@@ -1022,7 +1028,8 @@ test("a server that has already exited is not signalled again, but a live one is
   await assert.rejects(readAccountViaAppServer({ codexHome: root, command: process.execPath, args: [HUNG_SERVER], env, platform: "win32", spawnKiller, timeoutMs: 400 }), /timed out/);
   try {
     assert.equal(killed.length, 1);
-    assert.deepEqual(killed[0][0], "taskkill");
+    // By full path: a bare "taskkill" would be looked for in the current folder first.
+    assert.ok(/[\\/]System32[\\/]taskkill\.exe$/i.test(killed[0][0]) && win32.isAbsolute(killed[0][0]), killed[0][0]);
     assert.deepEqual(killed[0][1].slice(2), ["/T", "/F"]);
   } finally {
     // The faked killer never stopped the real server, and it may still be starting up:
@@ -1150,4 +1157,19 @@ test("an account reader that throws because the seat became unavailable is flagg
     captureUsageIdentity(root, { env: env2, throwOnFailure: true, accountReader: async () => { throw boom(); } }),
     (error) => error.seatUnavailable === undefined && error.code === "EPIPE",
   );
+});
+
+test("a cached reading of the wrong shape is no reading, and never makes the output throw", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const dataDir = join(root, "cache-statusband-codex");
+  const name = `rate-limits-${createHash("sha256").update(ACCOUNT_IDENTITY.key).digest("hex").slice(0, 16)}.json`;
+  const fetcher = async () => { throw new Error("must not read"); };
+  await mkdir(dataDir);
+  for (const bad of [{ credits: {} }, { credits: "x" }, { credits: [null] }, { credits: [[]] }, { primary: "x" }, { secondary: [] }]) {
+    await writeFile(join(dataDir, name), JSON.stringify({ version: 3, identityKey: ACCOUNT_IDENTITY.key, accountEmail: TEST_EMAIL, availableCount: 4, fetchedAt: now - 1000, nextAllowedAt: now + 60_000, lastErrorAt: null, ...bad }));
+    const snapshot = await getUsageSnapshot({ codexHome: root, now, identity: ACCOUNT_IDENTITY, fetcher, cacheOnly: true });
+    assert.equal(snapshot.availableCount, null, JSON.stringify(bad));
+    assert.doesNotThrow(() => formatUsageLines(snapshot, now, { includeResetDetails: true, locale: "en-US", timeZone: "UTC" }));
+  }
 });
