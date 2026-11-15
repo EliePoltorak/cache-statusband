@@ -156,6 +156,16 @@ test("speaks the documented app-server protocol", async () => {
   });
   assert.equal(result.rateLimitResetCredits.availableCount, 2);
   assert.equal(result.account.email, ["test", "example.invalid"].join("@"));
+  // A relative home reaches the child as a full path: the child may run from another folder.
+  const fromRelative = await fetchRateLimitsViaAppServer({
+    codexHome: relative(process.cwd(), selectedHome),
+    command: process.execPath,
+    args: [join(here, "..", "fixtures", "fake-app-server.mjs")],
+    timeoutMs: 2_000,
+    expectedEmail: FAKE_EMAIL,
+    env: { ...process.env, EXPECT_CODEX_HOME: selectedHome },
+  });
+  assert.equal(fromRelative.rateLimitResetCredits.availableCount, 2);
 });
 
 test("keeps usage polling and presentation scoped to the captured seat", async (t) => {

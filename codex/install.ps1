@@ -394,9 +394,12 @@ function Test-CodexConfig {
   $validationHome = Join-Path ([IO.Path]::GetTempPath()) ("cache-statusband-config-" + [guid]::NewGuid().ToString("N"))
   New-Item -ItemType Directory -Path $validationHome | Out-Null
   $previousCodexHome = $env:CODEX_HOME
+  $previousNoCurrentFolder = $env:NoDefaultCurrentDirectoryInExePath
   try {
     [IO.File]::WriteAllText((Join-Path $validationHome "config.toml"), $Text, [Text.UTF8Encoding]::new($false))
     $env:CODEX_HOME = $validationHome
+    # npm's codex.cmd runs a bare "node", which cmd.exe would look for in this folder first.
+    $env:NoDefaultCurrentDirectoryInExePath = "1"
     try {
       $checkArguments = @("app-server") + $(if ($Strict) { @("--strict-config") } else { @() }) + @("--print-startup-config")
       $validationOutput = & $CodexCommand @checkArguments 2>&1
@@ -409,6 +412,7 @@ function Test-CodexConfig {
     return [pscustomobject]@{ Passed = $false; CouldNotRun = $couldNotRun; Detail = $detail }
   } finally {
     $env:CODEX_HOME = $previousCodexHome
+    $env:NoDefaultCurrentDirectoryInExePath = $previousNoCurrentFolder
     if (Test-Path -LiteralPath $validationHome) {
       $resolved = (Resolve-Path -LiteralPath $validationHome).Path
       if ($resolved -eq $validationHome) {
@@ -553,8 +557,11 @@ $lastSeenConfigText = $null
 $foreignEditSeen = $false
 try {
   $previousCodexHome = $env:CODEX_HOME
+  $previousNoCurrentFolder = $env:NoDefaultCurrentDirectoryInExePath
   try {
     $env:CODEX_HOME = $CodexHome
+    # npm's codex.cmd runs a bare "node", which cmd.exe would look for in this folder first.
+    $env:NoDefaultCurrentDirectoryInExePath = "1"
     # Codex refuses to add a marketplace name that is already registered from another folder.
     # So the add is tried first, and only that refusal triggers a re-point: the old registration
     # is removed and the add repeated (Codex keeps the plugin's own enabled setting). Paths are
@@ -581,6 +588,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "codex plugin add failed ($LASTEXITCODE)" }
   } finally {
     $env:CODEX_HOME = $previousCodexHome
+    $env:NoDefaultCurrentDirectoryInExePath = $previousNoCurrentFolder
   }
   # What config.toml holds once Codex has finished registering. Any later read that differs
   # from the previous one is an edit by something else, which a failure must not undo. It is
