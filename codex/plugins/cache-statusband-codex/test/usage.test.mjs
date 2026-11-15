@@ -1,0 +1,1516 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { execFile, spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { access, copyFile, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { delimiter, dirname, join, relative, win32 } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
+import test from "node:test";
+import { capFirst, formatAge, formatDuration, formatUsageLines } from "../src/format.mjs";
+import { getSessionIdentity, saveSessionState } from "../src/session-state.mjs";
+import { usagePresentation } from "../src/settings.mjs";
+import {
+  fetchRateLimitsViaAppServer,
+  captureUsageIdentity,
+  codexHomeIsMissing,
+  getUsageSnapshot,
+  MAX_RETRY_AFTER_MS,
+  MIN_POLL_INTERVAL_MS,
+  readAccountViaAppServer,
+  resolveCodexLaunch,
+  windowsSystemExe,
+  retryAfterMilliseconds,
+  sanitizeRateLimits,
+} from "../src/usage.mjs";
+
+const TEST_EMAIL = ["person", "example.invalid"].join("@");
+const FAKE_EMAIL = ["test", "example.invalid"].join("@");
+const OTHER_EMAIL = ["other", "example.invalid"].join("@");
+const ACCOUNT_IDENTITY = { key: `account:${TEST_EMAIL}`, label: TEST_EMAIL, unavailable: false };
+const SEAT_PREFIX = ["S", "eat"].join("");
+const FIRST_SEAT = ["fixture", "one"].join("-");
+const SECOND_SEAT = ["fixture", "two"].join("-");
+const RAW = {
+  account: { type: "chatgpt", email: TEST_EMAIL, token: "fixture-private-value" },
+  rateLimits: {
+    primary: { usedPercent: 70, windowDurationMins: 300, resetsAt: 1_793_285_913 },
+    secondary: { usedPercent: 14, windowDurationMins: 10_080, resetsAt: 1_793_796_876 },
+  },
+  rateLimitResetCredits: {
+    availableCount: 2,
+    credits: [{ id: "RateLimitResetCredit_private", title: "Full reset", expiresAt: 1_793_302_971 }],
+  },
+  accountId: "private-account-id",
+};
+
+test("sanitizes rate-limit data down to display-safe fields", () => {
+  const safe = sanitizeRateLimits(RAW);
+  assert.equal(safe.availableCount, 2);
+  assert.equal(safe.accountEmail, TEST_EMAIL);
+  assert.deepEqual(safe.credits, [{ title: "Full reset", expiresAt: 1_793_302_971 }]);
+  assert.equal(safe.primary.windowDurationMins, 300);
+  assert.doesNotMatch(JSON.stringify(safe), /RateLimitResetCredit|account-id|fixture-private-value/);
+});
+
+test("shares one rate-limit read for at least five minutes", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  let calls = 0;
+  const fetcher = async () => { calls += 1; return RAW; };
+  const first = await getUsageSnapshot({ codexHome: root, now, fetcher, identity: ACCOUNT_IDENTITY });
+  const second = await getUsageSnapshot({ codexHome: root, now: now + MIN_POLL_INTERVAL_MS - 1, fetcher, identity: ACCOUNT_IDENTITY });
+  assert.equal(first.source, "live");
+  assert.equal(second.source, "cache");
+  assert.equal(second.availableCount, 2);
+  assert.equal(calls, 1);
+  const cacheName = `rate-limits-${createHash("sha256").update(ACCOUNT_IDENTITY.key).digest("hex").slice(0, 16)}.json`;
+  const stored = await readFile(join(root, "cache-statusband-codex", cacheName), "utf8");
+  assert.match(stored, new RegExp(TEST_EMAIL.replace(".", "\\.")));
+  assert.doesNotMatch(stored, /RateLimitResetCredit|account-id|fixture-private-value/);
+  await assert.rejects(access(join(root, "cache-statusband-codex", `${cacheName}.tmp`)));
+});
+
+// A failed read's backoff starts when the failure arrives, so it runs a little past the
+// injected `now` by however long the (fake) read took.
+function assertDeadline(actual, expected, tolerance = 1_000) {
+  assert.ok(actual >= expected && actual < expected + tolerance, `deadline ${actual} is not just after ${expected}`);
+}
+
+test("honors a Retry-After longer than the five-minute floor", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  let calls = 0;
+  const fetcher = async () => {
+    calls += 1;
+    const error = new Error("limited");
+    error.rpcData = { retry_after: 900 };
+    throw error;
+  };
+  const first = await getUsageSnapshot({ codexHome: root, now, fetcher, identity: ACCOUNT_IDENTITY });
+  const second = await getUsageSnapshot({ codexHome: root, now: now + 10 * 60_000, fetcher, identity: ACCOUNT_IDENTITY });
+  assertDeadline(first.nextAllowedAt, now + 15 * 60_000);
+  assert.equal(second.source, "cache");
+  assert.equal(calls, 1);
+  assert.equal(retryAfterMilliseconds({ rpcData: { retryAfterMs: 45_000 } }, now), 45_000);
+  assert.equal(retryAfterMilliseconds({ rpcMessage: "limited\nRetry-After: 75" }, now), 75_000);
+});
+
+test("caps Retry-After at one hour and keeps the last good reading", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const identity = { ...ACCOUNT_IDENTITY, label: `${SEAT_PREFIX} ${FIRST_SEAT}` };
+  const good = await getUsageSnapshot({ codexHome: root, now, identity, fetcher: async () => RAW });
+  const failed = await getUsageSnapshot({
+    codexHome: root,
+    now: now + MIN_POLL_INTERVAL_MS,
+    identity,
+    fetcher: async () => {
+      const error = new Error("limited");
+      error.rpcData = { retry_after: 86_400 };
+      throw error;
+    },
+  });
+  assert.equal(good.availableCount, 2);
+  assert.equal(failed.source, "stale");
+  assert.equal(failed.availableCount, 2);
+  assert.equal(failed.primary.usedPercent, 70);
+  assert.equal(failed.fetchedAt, now);
+  assertDeadline(failed.nextAllowedAt, now + MIN_POLL_INTERVAL_MS + MAX_RETRY_AFTER_MS);
+});
+
+test("a one-hour backoff written by a caller whose clock is a few seconds ahead still holds for a slightly earlier caller", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const identity = { ...ACCOUNT_IDENTITY, label: `${SEAT_PREFIX} ${FIRST_SEAT}` };
+  await getUsageSnapshot({ codexHome: root, now, identity, fetcher: async () => RAW });
+  const writerNow = now + MIN_POLL_INTERVAL_MS;
+  const failed = await getUsageSnapshot({
+    codexHome: root,
+    now: writerNow,
+    identity,
+    fetcher: async () => {
+      const error = new Error("limited");
+      error.rpcData = { retry_after: 86_400 };
+      throw error;
+    },
+  });
+  assertDeadline(failed.nextAllowedAt, writerNow + MAX_RETRY_AFTER_MS);
+  let calls = 0;
+  const reader = await getUsageSnapshot({
+    codexHome: root,
+    now: writerNow - 5_000,
+    identity,
+    fetcher: async () => { calls += 1; return RAW; },
+  });
+  assert.equal(calls, 0, "the backoff holds; no fetch");
+  assert.equal(reader.source, "cache");
+  assertDeadline(reader.nextAllowedAt, writerNow + MAX_RETRY_AFTER_MS);
+});
+
+test("speaks the documented app-server protocol", async () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const selectedHome = join(tmpdir(), "selected-codex-home");
+  const result = await fetchRateLimitsViaAppServer({
+    codexHome: selectedHome,
+    command: process.execPath,
+    args: [join(here, "..", "fixtures", "fake-app-server.mjs")],
+    timeoutMs: 2_000,
+    expectedEmail: FAKE_EMAIL,
+    env: { ...process.env, EXPECT_CODEX_HOME: selectedHome },
+  });
+  assert.equal(result.rateLimitResetCredits.availableCount, 2);
+  assert.equal(result.account.email, ["test", "example.invalid"].join("@"));
+  // A relative home reaches the child as a full path: the child may run from another folder.
+  const fromRelative = await fetchRateLimitsViaAppServer({
+    codexHome: relative(process.cwd(), selectedHome),
+    command: process.execPath,
+    args: [join(here, "..", "fixtures", "fake-app-server.mjs")],
+    timeoutMs: 2_000,
+    expectedEmail: FAKE_EMAIL,
+    env: { ...process.env, EXPECT_CODEX_HOME: selectedHome },
+  });
+  assert.equal(fromRelative.rateLimitResetCredits.availableCount, 2);
+  const account = await readAccountViaAppServer({
+    codexHome: relative(process.cwd(), selectedHome),
+    command: process.execPath,
+    args: [join(here, "..", "fixtures", "fake-app-server.mjs")],
+    timeoutMs: 2_000,
+    env: { ...process.env, EXPECT_CODEX_HOME: selectedHome },
+  });
+  assert.equal(account.email, ["test", "example.invalid"].join("@"));
+});
+
+test("keeps usage polling and presentation scoped to the captured seat", async (t) => {
+  const root = await fixtureRoot(t);
+  const seatPath = join(root, "active-seat.txt");
+  await writeFile(seatPath, `${FIRST_SEAT}\n`, "utf8");
+  await mkdir(join(root, "cache-statusband-codex"), { recursive: true });
+  await writeFile(
+    join(root, "cache-statusband-codex", "settings.json"),
+    `${JSON.stringify({ version: 1, seatFile: seatPath })}\n`,
+    "utf8",
+  );
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  let calls = 0;
+  let currentEmail = TEST_EMAIL;
+  const accountReader = async () => ({ email: currentEmail });
+  const fetcher = async () => { calls += 1; return { ...RAW, account: { email: currentEmail } }; };
+
+  const firstIdentity = await captureUsageIdentity(root, { env: {}, accountReader });
+  const first = await getUsageSnapshot({ codexHome: root, now, fetcher, env: {}, identity: firstIdentity });
+  assert.equal(first.identityKey, `account:${TEST_EMAIL}`);
+  assert.equal(first.availableCount, 2);
+  await writeFile(seatPath, `${SECOND_SEAT}\n`, "utf8");
+  currentEmail = OTHER_EMAIL;
+
+  const firstPresented = await usagePresentation(first, { codexHome: root, env: {}, identity: firstIdentity });
+  assert.equal(firstPresented.identity, `${SEAT_PREFIX} ${FIRST_SEAT}`);
+  assert.equal(firstPresented.snapshot.primary.usedPercent, 70);
+  assert.equal(calls, 1);
+
+  const secondIdentity = await captureUsageIdentity(root, { env: {}, accountReader });
+  const second = await getUsageSnapshot({ codexHome: root, now: now + 1_000, fetcher, env: {}, identity: secondIdentity });
+  assert.equal(second.source, "live");
+  assert.equal(second.identityKey, `account:${OTHER_EMAIL}`);
+  assert.equal(second.availableCount, 2);
+  assert.equal(calls, 2);
+
+  await writeFile(seatPath, `${FIRST_SEAT}\n`, "utf8");
+  currentEmail = TEST_EMAIL;
+  const backToFirst = await getUsageSnapshot({
+    codexHome: root,
+    now: now + 2_000,
+    fetcher,
+    env: {},
+    identity: await captureUsageIdentity(root, { env: {}, accountReader }),
+  });
+  assert.equal(backToFirst.source, "cache");
+  assert.equal(backToFirst.identityKey, `account:${TEST_EMAIL}`);
+  assert.equal(calls, 2);
+});
+
+test("rotation after seat capture cannot replace the original account's usage", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const identity = { ...ACCOUNT_IDENTITY, label: `${SEAT_PREFIX} ${FIRST_SEAT}` };
+  await getUsageSnapshot({ codexHome: root, now, identity, fetcher: async () => RAW });
+  const wrongAccount = { ...RAW, account: { email: OTHER_EMAIL }, rateLimitResetCredits: { availableCount: 6 }, rateLimits: { primary: { usedPercent: 91 } } };
+  let calls = 0;
+  const fetcher = async () => { calls += 1; return wrongAccount; };
+  const rejected = await getUsageSnapshot({ codexHome: root, now: now + MIN_POLL_INTERVAL_MS, identity, fetcher });
+  assert.equal(rejected.source, "stale");
+  assert.equal(rejected.accountEmail, TEST_EMAIL);
+  assert.equal(rejected.availableCount, 2);
+  assert.equal(rejected.primary.usedPercent, 70);
+  assert.equal(rejected.fetchedAt, now);
+  const shared = await getUsageSnapshot({ codexHome: root, now: now + MIN_POLL_INTERVAL_MS + 1, identity: ACCOUNT_IDENTITY, fetcher });
+  assert.equal(shared.source, "cache");
+  assert.equal(shared.availableCount, 2);
+  assert.equal(calls, 1);
+});
+
+test("unverifiable accounts cannot authorize a poll or a blank replacement", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const unavailable = await getUsageSnapshot({ codexHome: root, now, identity: null, fetcher: async () => { throw new Error("must not poll"); } });
+  assert.equal(unavailable.source, "identity-unavailable");
+  assert.equal(unavailable.availableCount, null);
+  await getUsageSnapshot({ codexHome: root, now, identity: ACCOUNT_IDENTITY, fetcher: async () => RAW });
+  const missingEmail = await getUsageSnapshot({ codexHome: root, now: now + MIN_POLL_INTERVAL_MS, identity: ACCOUNT_IDENTITY, fetcher: async () => ({ ...RAW, account: null }) });
+  assert.equal(missingEmail.source, "stale");
+  assert.equal(missingEmail.availableCount, 2);
+});
+
+test("seat rotation during identity capture yields no guessed account binding", async (t) => {
+  const root = await fixtureRoot(t);
+  const seatPath = join(root, "seat.txt");
+  await writeFile(seatPath, FIRST_SEAT);
+  const identity = await captureUsageIdentity(root, {
+    env: { CACHE_STATUSBAND_CODEX_SEAT_FILE: seatPath },
+    accountReader: async () => {
+      await writeFile(seatPath, SECOND_SEAT);
+      return { email: OTHER_EMAIL };
+    },
+  });
+  assert.equal(identity, null);
+});
+
+test("upgrading a seat-keyed cache preserves its deadline but discards unverified readings", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const oldKey = `seat:${FIRST_SEAT}`;
+  const dataDir = join(root, "cache-statusband-codex");
+  await mkdir(dataDir, { recursive: true });
+  const name = `rate-limits-${createHash("sha256").update(oldKey).digest("hex").slice(0, 16)}.json`;
+  await writeFile(join(dataDir, name), JSON.stringify({ version: 3, identityKey: oldKey, accountEmail: OTHER_EMAIL, availableCount: 6, nextAllowedAt: now + MIN_POLL_INTERVAL_MS }));
+  const identity = { ...ACCOUNT_IDENTITY, label: `${SEAT_PREFIX} ${FIRST_SEAT}` };
+  const snapshot = await getUsageSnapshot({ codexHome: root, now, identity, fetcher: async () => { throw new Error("must not poll before old deadline"); } });
+  assert.equal(snapshot.source, "cache");
+  assert.equal(snapshot.availableCount, null);
+  assert.equal(snapshot.accountEmail, null);
+  assert.equal(snapshot.nextAllowedAt, now + MIN_POLL_INTERVAL_MS);
+  const alias = { ...ACCOUNT_IDENTITY, label: `${SEAT_PREFIX} ${SECOND_SEAT}` };
+  const shared = await getUsageSnapshot({ codexHome: root, now: now + 1, identity: alias, fetcher: async () => { throw new Error("must share migrated deadline"); } });
+  assert.equal(shared.source, "cache");
+  assert.equal(shared.nextAllowedAt, snapshot.nextAllowedAt);
+});
+
+test("a seat-keyed cache found while the usage lock is busy is shown without its migration flag", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const oldKey = `seat:${FIRST_SEAT}`;
+  const dataDir = join(root, "cache-statusband-codex");
+  await mkdir(dataDir, { recursive: true });
+  const hash = (key) => createHash("sha256").update(key).digest("hex").slice(0, 16);
+  await writeFile(join(dataDir, `rate-limits-${hash(oldKey)}.json`), JSON.stringify({ version: 3, identityKey: oldKey, accountEmail: OTHER_EMAIL, availableCount: 6, nextAllowedAt: now + MIN_POLL_INTERVAL_MS }));
+  // Another process holds the new identity's lock (written just now, so it is not stale).
+  await writeFile(join(dataDir, `rate-limits-${hash(ACCOUNT_IDENTITY.key)}.lock`), "someone-else");
+  const identity = { ...ACCOUNT_IDENTITY, label: `${SEAT_PREFIX} ${FIRST_SEAT}` };
+  const snapshot = await getUsageSnapshot({ codexHome: root, now, identity, fetcher: async () => { throw new Error("must not poll while the lock is busy"); } });
+  assert.equal(snapshot.source, "cache-busy");
+  assert.equal("migrateSeatDeadline" in snapshot, false);
+  assert.equal(snapshot.nextAllowedAt, now + MIN_POLL_INTERVAL_MS);
+});
+
+test("captures the account identity once when no seat file is configured", async (t) => {
+  const root = await fixtureRoot(t);
+  let reads = 0;
+  const identity = await captureUsageIdentity(root, {
+    env: {},
+    accountReader: async () => {
+      reads += 1;
+      return { email: TEST_EMAIL };
+    },
+  });
+  assert.deepEqual(identity, { key: `account:${TEST_EMAIL}`, label: TEST_EMAIL, unavailable: false });
+  assert.equal(reads, 1);
+});
+
+test("prints every supplied expiry as an absolute local date in detailed output", () => {
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const snapshot = {
+    availableCount: 2,
+    credits: [
+      { title: "Later reset", expiresAt: Date.parse("2026-10-31T12:00:00.000Z") / 1000 },
+      { title: "First reset", expiresAt: Date.parse("2026-10-29T20:22:00.000Z") / 1000 },
+    ],
+  };
+  const compact = formatUsageLines(snapshot, now);
+  const detailed = formatUsageLines(snapshot, now, { includeResetDetails: true, locale: "en-US", timeZone: "UTC" });
+  assert.equal(compact.length, 1);
+  assert.match(detailed[1], /^  First reset — expires Oct 29, 2026, 8:22 PM UTC \(in 8h22m\)$/);
+  assert.match(detailed[2], /^  Later reset — expires Oct 31, 2026, 12:00 PM UTC \(in 2d0h\)$/);
+});
+
+test("formats usage windows and ages without reset prose", () => {
+  const now = Date.parse("2026-10-29T08:00:00.000Z");
+  const lines = formatUsageLines({
+    primary: { usedPercent: 43, windowDurationMins: 300, resetsAt: (now + (2 * 60 + 17) * 60_000) / 1000 },
+    secondary: { usedPercent: 52, windowDurationMins: 10_080, resetsAt: (now + (5 * 24 + 17) * 60 * 60_000) / 1000 },
+  }, now);
+  assert.deepEqual(lines.slice(-2), ["5h 43% · 2h17m", "Week 52% · 5d17h"]);
+  assert.equal(formatDuration((23 * 60 + 5) * 60_000), "23h05m");
+  assert.equal(formatDuration(40 * 60_000), "40m");
+  assert.equal(formatAge(now - (7 * 24 + 9) * 60 * 60_000, now), "7d9h");
+});
+
+test("states when Codex supplies a banked count without expiry details", () => {
+  const lines = formatUsageLines(
+    { availableCount: 2, credits: null },
+    Date.parse("2026-10-29T12:00:00.000Z"),
+    { includeResetDetails: true },
+  );
+  assert.equal(lines[1], "  Expiration details were not supplied by Codex.");
+});
+
+test("capitalizes the first word past symbols while preserving emails and digit labels", () => {
+  assert.equal(capFirst("● cache warm"), "● Cache warm");
+  assert.equal(capFirst("  expiration unavailable"), "  Expiration unavailable");
+  assert.equal(capFirst("5h 70% used"), "5h 70% used");
+  assert.equal(capFirst(TEST_EMAIL), TEST_EMAIL);
+});
+
+test("uses an explicitly configured seat file before the account email", async (t) => {
+  const root = await fixtureRoot(t);
+  const seatPath = join(root, "active-seat.txt");
+  await writeFile(seatPath, `${FIRST_SEAT}\nunsafe\u0007`, "utf8");
+  await mkdir(join(root, "cache-statusband-codex"), { recursive: true });
+  await writeFile(
+    join(root, "cache-statusband-codex", "settings.json"),
+    `${JSON.stringify({ version: 1, seatFile: seatPath })}\n`,
+    "utf8",
+  );
+  assert.equal((await usagePresentation({ accountEmail: TEST_EMAIL }, { codexHome: root, env: {} })).identity, `${SEAT_PREFIX} ${FIRST_SEAT} unsafe`);
+  assert.equal((await usagePresentation({ accountEmail: TEST_EMAIL }, { codexHome: join(root, "missing"), env: {} })).identity, TEST_EMAIL);
+});
+
+const FAKE_SERVER = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "fake-app-server.mjs");
+
+// The Windows lookup checks Windows paths, which a POSIX temp folder is not, so those tests run
+// on Windows only; this one covers the launch everywhere else.
+test("off Windows, Codex is launched from CODEX_BIN or by name", () => {
+  assert.deepEqual(resolveCodexLaunch({ CODEX_BIN: "/opt/codex" }, "linux"), { command: "/opt/codex", args: ["app-server"] });
+  assert.deepEqual(resolveCodexLaunch({ PATH: "/usr/bin" }, "linux"), { command: "codex", args: ["app-server"] });
+  assert.equal(resolveCodexLaunch({ CODEX_BIN: "/opt/100%/codex" }, "darwin").command, "/opt/100%/codex");
+});
+
+test("resolves a runnable Codex command from CODEX_BIN or the Windows PATH", { skip: process.platform !== "win32" }, async (t) => {
+  const root = await fixtureRoot(t);
+  const bin = join(root, "npm bin");
+  const other = join(root, "other");
+  await mkdir(bin);
+  await mkdir(other);
+  await writeFile(join(bin, "codex.cmd"), "");
+  await writeFile(join(other, "codex.exe"), "");
+  const ComSpec = "C:\\Windows\\System32\\cmd.exe";
+
+  const wrapped = resolveCodexLaunch({ Path: bin, ComSpec }, "win32");
+  assert.equal(wrapped.command, ComSpec);
+  assert.deepEqual(wrapped.args, ["/d", "/v:off", "/s", "/c", `""${join(bin, "codex.cmd")}" app-server"`]);
+  assert.equal(wrapped.windowsVerbatimArguments, true);
+
+  // With no ComSpec, cmd.exe by full path (a bare name would be looked for in the current folder first).
+  assert.equal(resolveCodexLaunch({ PATH: `${bin}${delimiter}${other}` }, "win32").command, "C:\\Windows\\System32\\cmd.exe");
+  assert.equal(resolveCodexLaunch({ PATH: bin, SystemRoot: "D:\\Win" }, "win32").command, "D:\\Win\\System32\\cmd.exe");
+  // Names are matched case-insensitively, and only a full path is trusted as a root or a ComSpec.
+  assert.equal(resolveCodexLaunch({ PATH: bin, SYSTEMROOT: "D:\\Win" }, "win32").command, "D:\\Win\\System32\\cmd.exe");
+  for (const root of [".", "C:", "\\Windows", "Windows"]) {
+    assert.equal(resolveCodexLaunch({ PATH: bin, SystemRoot: root }, "win32").command, "C:\\Windows\\System32\\cmd.exe", root);
+  }
+  assert.equal(resolveCodexLaunch({ PATH: bin, ComSpec: "cmd.exe" }, "win32").command, "C:\\Windows\\System32\\cmd.exe");
+  assert.equal(windowsSystemExe("taskkill.exe", { systemroot: "E:\\W" }), "E:\\W\\System32\\taskkill.exe");
+  // A CODEX_BIN that is neither a full path nor a bare name would resolve against the current
+  // folder (the open project, for the hooks), so it is refused. Quotes around a full path are not
+  // part of it.
+  assert.equal(resolveCodexLaunch({ CODEX_BIN: ' "C:\\Program Files\\Codex\\codex.exe" ' }, "win32").command, "C:\\Program Files\\Codex\\codex.exe");
+  assert.equal(resolveCodexLaunch({ CODEX_BIN: '" C:\\Program Files\\Codex\\codex.exe "' }, "win32").command, "C:\\Program Files\\Codex\\codex.exe");
+  // A PATH entry is unquoted and trimmed the same way, spaces inside its quotes included.
+  assert.equal(resolveCodexLaunch({ PATH: `" ${other} "` }, "win32").command, join(other, "codex.exe"));
+  for (const relativeBin of ["tools\\codex.cmd", ".\\codex.exe", "./codex.exe", "C:codex.exe", "\\codex.exe"]) {
+    assert.throws(() => resolveCodexLaunch({ CODEX_BIN: relativeBin, PATH: other }, "win32"), /not a full path/, relativeBin);
+  }
+  // A CODEX_BIN with no folder is a name looked up on full-path PATH entries, never the current folder.
+  assert.equal(resolveCodexLaunch({ CODEX_BIN: "codex.exe", PATH: `${other}${delimiter}.` }, "win32").command, join(other, "codex.exe"));
+  assert.equal(resolveCodexLaunch({ CODEX_BIN: "codex", PATH: other }, "win32").command, join(other, "codex.exe"));
+  assert.throws(() => resolveCodexLaunch({ CODEX_BIN: "codex.exe", PATH: "." }, "win32"), (error) => error.code === "ENOENT" && /CODEX_BIN names codex\.exe/.test(error.message));
+  // cmd.exe swaps a UNC working folder for the Windows folder, so a shared codex.cmd runs from
+  // cmd.exe's own folder: never the caller's.
+  const shared = resolveCodexLaunch({ CODEX_BIN: "\\\\server\\share\\codex.cmd", ComSpec }, "win32");
+  assert.equal(shared.cwd, "C:\\Windows\\System32");
+  assert.equal(shared.guardCurrentFolder, true);
+  // A program can run from a UNC folder, so a shared codex.exe gets its own.
+  assert.equal(resolveCodexLaunch({ CODEX_BIN: "\\\\server\\share\\codex.exe" }, "win32").cwd, "\\\\server\\share\\");
+  // A relative PATH entry resolves against the current folder, so it is never searched.
+  if (process.platform === "win32") {
+    assert.throws(() => resolveCodexLaunch({ PATH: relative(process.cwd(), other) }, "win32"), (error) => error.code === "ENOENT");
+  }
+  // An .exe also runs from its own folder with the current-folder guard (it may be a launcher
+  // that starts a bare "node", as Bun's is).
+  assert.deepEqual(resolveCodexLaunch({ PATH: `${other}${delimiter}${bin}` }, "win32"), { command: join(other, "codex.exe"), args: ["app-server"], cwd: other, guardCurrentFolder: true });
+  assert.equal(resolveCodexLaunch({ PATH: other, CODEX_BIN: join(bin, "codex.cmd"), ComSpec }, "win32").windowsVerbatimArguments, true);
+  assert.deepEqual(resolveCodexLaunch({ CODEX_BIN: "/opt/codex" }, "linux"), { command: "/opt/codex", args: ["app-server"] });
+  assert.deepEqual(resolveCodexLaunch({ PATH: bin }, "linux"), { command: "codex", args: ["app-server"] });
+  // Never a bare name on Windows: it would find a codex.exe in the current folder first.
+  assert.throws(() => resolveCodexLaunch({ PATH: join(root, "empty") }, "win32"), (error) => error.code === "ENOENT" && /not found on PATH/.test(error.message));
+});
+
+test("a codex.cmd whose path contains % is refused rather than expanded by cmd.exe", { skip: process.platform !== "win32" }, async (t) => {
+  const root = await fixtureRoot(t);
+  const bin = join(root, "100%PATH%");
+  await mkdir(bin);
+  await writeFile(join(bin, "codex.cmd"), "");
+  assert.throws(() => resolveCodexLaunch({ Path: bin }, "win32"), /cannot safely run a path containing "%"/);
+  assert.throws(() => resolveCodexLaunch({ CODEX_BIN: join(bin, "codex.cmd") }, "win32"), /%/);
+  // Only the cmd.exe wrapper has the problem: an .exe or a non-Windows path is fine.
+  assert.equal(resolveCodexLaunch({ CODEX_BIN: join(bin, "codex.exe") }, "win32").command, join(bin, "codex.exe"));
+  assert.equal(resolveCodexLaunch({ CODEX_BIN: "/opt/100%/codex" }, "linux").command, "/opt/100%/codex");
+  // The readers surface it as an ordinary reader error.
+  const env = { ...process.env, CODEX_BIN: join(bin, "codex.cmd") };
+  const launch = { codexHome: root, env, platform: "win32", timeoutMs: 1000 };
+  await assert.rejects(readAccountViaAppServer(launch), /CODEX_BIN/);
+  await assert.rejects(fetchRateLimitsViaAppServer({ ...launch, expectedEmail: FAKE_EMAIL }), /CODEX_BIN/);
+});
+
+test("the app-server readers run an npm-style codex.cmd found on PATH", { skip: process.platform !== "win32" }, async (t) => {
+  const root = await fixtureRoot(t);
+  const bin = join(root, "npm bin dir");
+  await mkdir(bin);
+  await writeFile(join(bin, "codex.cmd"), `@echo off\r\n"${process.execPath}" "${FAKE_SERVER}" %*\r\n`);
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) if (key.toLowerCase() === "path") delete env[key];
+  env.Path = `${bin}${delimiter}${process.env.PATH ?? process.env.Path ?? ""}`;
+  delete env.CODEX_BIN;
+  const account = await readAccountViaAppServer({ codexHome: root, env, timeoutMs: 5_000 });
+  assert.equal(account.email, ["test", "example.invalid"].join("@"));
+  const limits = await fetchRateLimitsViaAppServer({ codexHome: root, env, timeoutMs: 5_000, expectedEmail: FAKE_EMAIL });
+  assert.equal(limits.rateLimitResetCredits.availableCount, 2);
+});
+
+const HUNG_SERVER = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "hung-app-server.mjs");
+const USAGE_MODULE = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "usage.mjs");
+
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitUntil(condition, ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (await condition()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return condition();
+}
+
+// Launch options for a Codex that never answers: a plain node process everywhere, and on
+// Windows the npm shape too (codex.cmd -> cmd.exe -> node), where killing the wrapper
+// alone leaves the real server running.
+async function hungLaunch(root, { npmShape }) {
+  const pidFile = join(root, "hung.pid");
+  const env = { ...process.env, HUNG_PID_FILE: pidFile };
+  if (!npmShape) return { pidFile, env, options: { command: process.execPath, args: [HUNG_SERVER] } };
+  const bin = join(root, "npm bin dir");
+  await mkdir(bin);
+  await writeFile(join(bin, "codex.cmd"), `@echo off\r\n"${process.execPath}" "${HUNG_SERVER}" %*\r\n`);
+  for (const key of Object.keys(env)) if (key.toLowerCase() === "path") delete env[key];
+  env.Path = `${bin}${delimiter}${process.env.PATH ?? process.env.Path ?? ""}`;
+  delete env.CODEX_BIN;
+  return { pidFile, env, options: {} };
+}
+
+for (const npmShape of process.platform === "win32" ? [false, true] : [false]) {
+  const shape = npmShape ? "an npm-style codex.cmd" : "a plain executable";
+  for (const [name, reader] of [["account", readAccountViaAppServer], ["rate-limit", fetchRateLimitsViaAppServer]]) {
+    test(`a timed-out ${name} read leaves no server behind (${shape})`, async (t) => {
+      // A 5 s deadline leaves a cold node start at idle priority on a busy machine time to write
+      // its pid, so the test checks a server that really started (one try, so no earlier try's
+      // late-starting server can go unchecked).
+      const root = await fixtureRoot(t);
+      const { pidFile, env, options } = await hungLaunch(root, { npmShape });
+      await assert.rejects(reader({ codexHome: root, env, timeoutMs: 5000, expectedEmail: FAKE_EMAIL, ...options }), /timed out/);
+      const pid = Number(await readFile(pidFile, "utf8"));
+      assert.ok(Number.isInteger(pid) && pid > 0);
+      // Never killed by pid here: once stopped, its pid may be reused; a server left running ends
+      // itself within 30 s.
+      assert.ok(await waitUntil(() => !alive(pid), 5_000), "the hung server was left running");
+    });
+  }
+
+  test(`a process that timed out on a hung Codex exits promptly (${shape})`, async (t) => {
+    const root = await fixtureRoot(t);
+    const { env, options } = await hungLaunch(root, { npmShape });
+    const script = join(root, "call-reader.mjs");
+    await writeFile(script, [
+      `import { fetchRateLimitsViaAppServer } from ${JSON.stringify(pathToFileURL(USAGE_MODULE).href)};`,
+      `try { await fetchRateLimitsViaAppServer({ codexHome: ${JSON.stringify(root)}, timeoutMs: 800, expectedEmail: ${JSON.stringify(FAKE_EMAIL)}, ...${JSON.stringify(options)} }); } catch {}`,
+    ].join("\n"));
+    const started = Date.now();
+    const child = spawn(process.execPath, [script], { env, stdio: "ignore", windowsHide: true });
+    const exited = new Promise((resolve) => child.once("exit", resolve));
+    const gaveUp = new Promise((resolve) => setTimeout(() => resolve("hung"), 8_000));
+    const outcome = await Promise.race([exited, gaveUp]);
+    if (outcome === "hung") child.kill();
+    // The server is not killed by pid: the reader stopped it, so its pid may be reused (a server
+    // left running ends itself within 30 s).
+    assert.notEqual(outcome, "hung", "the process was held open by the abandoned server");
+    assert.ok(Date.now() - started < 5_000);
+  });
+}
+
+test("server messages that reuse a response id are not mistaken for responses", async () => {
+  const options = { command: process.execPath, args: [FAKE_SERVER], timeoutMs: 3_000, env: { ...process.env, FAKE_SERVER_NOISE: "1" } };
+  assert.equal((await readAccountViaAppServer(options)).email, ["test", "example.invalid"].join("@"));
+  const limits = await fetchRateLimitsViaAppServer({ ...options, expectedEmail: FAKE_EMAIL });
+  assert.equal(limits.account.email, ["test", "example.invalid"].join("@"));
+  assert.equal(limits.rateLimitResetCredits.availableCount, 2);
+});
+
+test("identity capture can fail loudly and never labels an unreadable seat with the email", async (t) => {
+  const root = await fixtureRoot(t);
+  const accountReader = async () => ({ email: TEST_EMAIL });
+  await assert.rejects(captureUsageIdentity(root, { env: {}, throwOnFailure: true, accountReader: async () => { throw new Error("app-server down"); } }), /app-server down/);
+  assert.equal(await captureUsageIdentity(root, { env: {}, accountReader: async () => { throw new Error("app-server down"); } }), null);
+  // Signed out is an answer, not a failure.
+  assert.equal(await captureUsageIdentity(root, { env: {}, throwOnFailure: true, accountReader: async () => null }), null);
+
+  const emptySeat = join(root, "empty-seat.txt");
+  await writeFile(emptySeat, "  \n");
+  const env = { CACHE_STATUSBAND_CODEX_SEAT_FILE: emptySeat };
+  assert.equal(await captureUsageIdentity(root, { env, accountReader }), null);
+  await assert.rejects(captureUsageIdentity(root, { env, accountReader, throwOnFailure: true }), /seat/i);
+  assert.equal((await usagePresentation({ accountEmail: TEST_EMAIL }, { codexHome: root, env })).identity, null);
+
+  const seatPath = join(root, "seat.txt");
+  await writeFile(seatPath, FIRST_SEAT);
+  await assert.rejects(captureUsageIdentity(root, {
+    env: { CACHE_STATUSBAND_CODEX_SEAT_FILE: seatPath },
+    throwOnFailure: true,
+    accountReader: async () => { await writeFile(seatPath, SECOND_SEAT); return { email: TEST_EMAIL }; },
+  }), /seat/i);
+});
+
+test("a login with no ChatGPT email is flagged as such, never as signed out, with and without a seat", async (t) => {
+  const root = await fixtureRoot(t);
+  const noEmail = { type: "apiKey" };
+  // No seat: throws the no-email flag, quietly null without throwOnFailure.
+  const bare = await captureUsageIdentity(root, { env: {}, throwOnFailure: true, accountReader: async () => noEmail }).catch((error) => error);
+  assert.equal(bare.noAccountEmail, true);
+  assert.equal(bare.signedOut, undefined);
+  assert.equal(bare.accountType, "apiKey");
+  assert.equal(await captureUsageIdentity(root, { env: {}, accountReader: async () => noEmail }), null);
+  // An unusable type reads as unknown; an email that fails validation counts as no email.
+  const odd = await captureUsageIdentity(root, { env: {}, throwOnFailure: true, accountReader: async () => ({ type: "a\u001b[2Jb", email: "not an email" }) }).catch((error) => error);
+  assert.equal(odd.noAccountEmail, true);
+  assert.equal(odd.accountType, "unknown type");
+  // Signed out stays signed out.
+  assert.equal(await captureUsageIdentity(root, { env: {}, throwOnFailure: true, accountReader: async () => null }), null);
+
+  const seatPath = join(root, "seat.txt");
+  await writeFile(seatPath, FIRST_SEAT);
+  const env = { CACHE_STATUSBAND_CODEX_SEAT_FILE: seatPath };
+  const seated = await captureUsageIdentity(root, { env, throwOnFailure: true, accountReader: async () => ({ type: "amazonBedrock" }) }).catch((error) => error);
+  assert.equal(seated.noAccountEmail, true);
+  assert.equal(seated.signedOut, undefined);
+  assert.equal(seated.accountType, "amazonBedrock");
+  const seatedOut = await captureUsageIdentity(root, { env, throwOnFailure: true, accountReader: async () => null }).catch((error) => error);
+  assert.equal(seatedOut.signedOut, true);
+  assert.equal(seatedOut.noAccountEmail, undefined);
+});
+
+test("with a seat configured, a signed-out or changing login is a failure, not a binding", async (t) => {
+  const root = await fixtureRoot(t);
+  const seatPath = join(root, "seat.txt");
+  await writeFile(seatPath, FIRST_SEAT);
+  const env = { CACHE_STATUSBAND_CODEX_SEAT_FILE: seatPath };
+  // Signed out under a seat label: nothing to bind the label to.
+  await assert.rejects(captureUsageIdentity(root, { env, throwOnFailure: true, accountReader: async () => null }), /signed in/i);
+  assert.equal(await captureUsageIdentity(root, { env, accountReader: async () => null }), null);
+  // The login is read again after the seat was last checked; a change fails the capture.
+  const emails = [TEST_EMAIL, OTHER_EMAIL];
+  await assert.rejects(captureUsageIdentity(root, { env, throwOnFailure: true, accountReader: async () => ({ email: emails.shift() }) }), /changed/i);
+  const again = [TEST_EMAIL, null];
+  assert.equal(await captureUsageIdentity(root, { env, accountReader: async () => ({ email: again.shift() }) }), null);
+  // A stable login under a seat is bound, after exactly two reads.
+  let reads = 0;
+  const identity = await captureUsageIdentity(root, { env, throwOnFailure: true, accountReader: async () => { reads += 1; return { email: TEST_EMAIL }; } });
+  assert.equal(identity.key, `account:${TEST_EMAIL}`);
+  assert.equal(identity.label, `${SEAT_PREFIX} ${FIRST_SEAT}`);
+  assert.equal(reads, 2);
+  // Without a seat the login is the label: signed out stays an answer, and one read suffices.
+  reads = 0;
+  assert.equal((await captureUsageIdentity(root, { env: {}, accountReader: async () => { reads += 1; return { email: TEST_EMAIL }; } })).label, TEST_EMAIL);
+  assert.equal(reads, 1);
+});
+
+test("a per-call timeout reaches the identity reader and the usage fetcher", async (t) => {
+  const root = await fixtureRoot(t);
+  let readerTimeout;
+  const identity = await captureUsageIdentity(root, { env: {}, timeoutMs: 1234, accountReader: async ({ timeoutMs }) => { readerTimeout = timeoutMs; return { email: TEST_EMAIL }; } });
+  assert.equal(readerTimeout, 1234);
+  let fetchTimeout;
+  await getUsageSnapshot({ codexHome: root, now: Date.now(), identity, timeoutMs: 4321, fetcher: async ({ timeoutMs }) => { fetchTimeout = timeoutMs; return RAW; } });
+  assert.equal(fetchTimeout, 4321);
+});
+
+test("the missing-home line carries the path with control characters removed", async (t) => {
+  const parent = await fixtureRoot(t);
+  const here = dirname(fileURLToPath(import.meta.url));
+  const bin = join(here, "..", "bin", "cache-statusband-codex.mjs");
+  const home = join(parent, "no-such\u001b[31m-home");
+  const { stderr } = await promisify(execFile)(process.execPath, [bin, "usage", "--codex-home", home], {
+    env: { ...process.env, CACHE_STATUSBAND_CODEX_SEAT_FILE: "" },
+    timeout: 20_000,
+  });
+  assert.doesNotMatch(stderr, /\u001b/);
+  assert.match(stderr, /usage not read: the Codex home .*no-such.*-home does not exist\n$/);
+});
+
+test("a seat that becomes configured but unreadable during the account read is flagged seatUnavailable", async (t) => {
+  const root = await fixtureRoot(t);
+  const seatFile = join(root, "seat.txt");
+  const account = { type: "chatgpt", email: TEST_EMAIL };
+
+  // No seat at the start, a seat whose file reads empty by the end: flagged (the CLI stays silent).
+  const env = {};
+  await writeFile(seatFile, "");
+  await assert.rejects(
+    captureUsageIdentity(root, { env, throwOnFailure: true, accountReader: async () => { env.CACHE_STATUSBAND_CODEX_SEAT_FILE = seatFile; return account; } }),
+    (error) => error.seatUnavailable === true && /seat changed during the account read/.test(error.message),
+  );
+  // ...and a seat that became available is a plain change, not flagged.
+  const env2 = {};
+  await writeFile(seatFile, "alpha");
+  await assert.rejects(
+    captureUsageIdentity(root, { env: env2, throwOnFailure: true, accountReader: async () => { env2.CACHE_STATUSBAND_CODEX_SEAT_FILE = seatFile; return account; } }),
+    (error) => error.seatUnavailable === undefined && /seat changed during the account read/.test(error.message),
+  );
+  // A configured seat whose file empties while the login is read twice: flagged.
+  const env3 = { CACHE_STATUSBAND_CODEX_SEAT_FILE: seatFile };
+  await writeFile(seatFile, "alpha");
+  await assert.rejects(
+    captureUsageIdentity(root, { env: env3, throwOnFailure: true, accountReader: async () => { await writeFile(seatFile, ""); return account; } }),
+    (error) => error.seatUnavailable === true,
+  );
+  // A seat that merely changed to another readable label is not flagged.
+  await writeFile(seatFile, "alpha");
+  await assert.rejects(
+    captureUsageIdentity(root, { env: env3, throwOnFailure: true, accountReader: async () => { await writeFile(seatFile, "beta"); return account; } }),
+    (error) => error.seatUnavailable === undefined && /seat changed/.test(error.message),
+  );
+});
+
+test("retry-after in an error message: only HTTP header lines are read, in the RFC 9110 forms", () => {
+  const now = Date.parse("2026-11-13T12:00:00.000Z");
+  const ms = (message) => retryAfterMilliseconds({ message }, now);
+  const rows = [
+    // delay-seconds on a header line (any case, spaces around the colon, a quoted integer).
+    ["Retry-After: 30", 3e4],
+    ["retry-after: 30", 3e4],
+    ["RETRY-AFTER:30", 3e4],
+    ["  Retry-After :  30  ", 3e4],
+    ['Retry-After: "30"', 3e4],
+    ["Retry-After: 0", 0],
+    // Line ends: LF, CRLF and a lone CR; only the value on the Retry-After line is read.
+    ["Retry-After: 3600\nMS-CV: abc", 3.6e6],
+    ["Retry-After: 30\n-5 minutes", 3e4],
+    ["Retry-After: 30\r\nContent-Length: 0", 3e4],
+    ["HTTP/1.1 429 Too Many Requests\r\nRetry-After: 17\r\n\r\n{}", 1.7e4],
+    ["x\rRetry-After: 45\rY", 4.5e4],
+    ["Retry-After: 2\nRetry-After: 90", 9e4],
+    // Each RFC 9110 HTTP-date form: IMF-fixdate, RFC 850, asctime (also with a one-digit day).
+    ["Retry-After: Fri, 13 Nov 2026 12:30:00 GMT", 1.8e6],
+    ["Retry-After: Friday, 13-Nov-26 12:30:00 GMT", 1.8e6],
+    ["Retry-After: Fri Nov 13 12:30:00 2026", 1.8e6],
+    ["Retry-After: Sun Nov  1 12:30:00 2026", 0],
+    ['Retry-After: "Fri, 13 Nov 2026 12:30:00 GMT"', 1.8e6],
+    // A moment already past is 0, never negative.
+    ["Retry-After: Fri, 13 Nov 2026 11:00:00 GMT", 0],
+    // A JSON header map: "retry-after" with a quoted or bare value, anywhere in a line.
+    ['{"Retry-After":"30","Content-Type":"x"}', 3e4],
+    ['{"retry-after": 45}', 4.5e4],
+    ['{"retry-after":"Fri, 13 Nov 2026 12:30:00 GMT"}', 1.8e6],
+    ['"headers": {\n  "retry-after": "20"\n}', 2e4],
+    // A Retry-After with any other value is the cap: words, units, decimals, negatives, nothing,
+    // an ISO date (not an RFC 9110 form), a range, an unread zone, an impossible date, null.
+    ["Retry-After: soon", MAX_RETRY_AFTER_MS],
+    ["Retry-After: 30 seconds", MAX_RETRY_AFTER_MS],
+    ["Retry-After: 30.5", MAX_RETRY_AFTER_MS],
+    ["Retry-After: -5", MAX_RETRY_AFTER_MS],
+    ["Retry-After:", MAX_RETRY_AFTER_MS],
+    ["Retry-After: 2026-11-13T12:30:00Z", MAX_RETRY_AFTER_MS],
+    ["Retry-After: 5-10 minutes", MAX_RETRY_AFTER_MS],
+    ["Retry-After: Fri, 13 Nov 2026 12:30:00 EST", MAX_RETRY_AFTER_MS],
+    ["Retry-After: Fri, 32 Nov 2026 12:30:00 GMT", MAX_RETRY_AFTER_MS],
+    ['{"retry-after":"soon"}', MAX_RETRY_AFTER_MS],
+    ['{"retry-after":null}', MAX_RETRY_AFTER_MS],
+    // A parsed wait beats a cap.
+    ["Retry-After: soon\nRetry-After: 20", 2e4],
+    // Nothing else is read: no prose, no "retry at", no unit durations, no ranges, no lists, no
+    // retry_after_ms text, and a header that is not at the start of its line.
+    ["retry after 20 minutes", null],
+    ["Retry after 5 minutes", null],
+    ["limited; retry after 75 seconds", null],
+    ["retry after 30s", null],
+    ["retry after 1h30m", null],
+    ["retry after 5-10 minutes", null],
+    ["retry after 30 minutes or 2 hours", null],
+    ["retry at 12:30", null],
+    ["retry after 2026-11-13T12:20:00Z", null],
+    ["retry after the window resets in 3 hours", null],
+    ["retry after reconnecting", null],
+    ["limited; retry_after_ms: 500", null],
+    ["retry-after-ms=250", null],
+    ['{"retry_after":"120"}', null],
+    ["rate limited; Retry-After: 30", null],
+    ["no Retry-After header was sent", null],
+    ["no hint here", null],
+    // Ids, hashes and numbers near the words are nothing.
+    ["retry after 7d9f3", null],
+    ["retry after 41d4", null],
+    ["retry after 8d1e", null],
+    ["retry after 20s (request id 7d9f3a-41d4-8d1e-9b2c)", null],
+    ["retry after 20 seconds, request_id req_41d4e8d1e", null],
+    ["retry after 20s; trace 8d1e7d9f3 2026 attempt 5", null],
+  ];
+  for (const [message, expected] of rows) assert.equal(ms(message), expected, message);
+  assert.equal(ms("Retry-After: 9".concat("9".repeat(150))), Number.MAX_SAFE_INTEGER);
+  assert.equal(ms("Retry-After: 9".concat("9".repeat(400))), MAX_RETRY_AFTER_MS);
+});
+
+test("retry-after in structured error data: every key spelling, numbers, strings, moments and objects", () => {
+  const now = Date.parse("2026-11-13T12:00:00.000Z");
+  const data = (rpcData) => retryAfterMilliseconds({ rpcData }, now);
+  const epochSeconds = Date.parse("2026-11-13T12:10:00Z") / 1000;
+  const rows = [
+    // Key spellings: snake, kebab and camel case, any case, with or without a unit word.
+    [{ retry_after: 900 }, 9e5],
+    [{ "retry-after": 900 }, 9e5],
+    [{ retryAfter: 900 }, 9e5],
+    [{ RetryAfter: 900 }, 9e5],
+    [{ "Retry-After": 900 }, 9e5],
+    [{ retry_after_seconds: 1800 }, 1.8e6],
+    [{ "retry-after-seconds": 1800 }, 1.8e6],
+    [{ retryAfterSeconds: 1800 }, 1.8e6],
+    [{ RetryAfterSeconds: 1800 }, 1.8e6],
+    [{ retry_after_secs: 30 }, 3e4],
+    [{ retry_after_ms: 250 }, 250],
+    [{ "retry-after-ms": 250 }, 250],
+    [{ retryAfterMs: 45_000 }, 45_000],
+    [{ RETRY_AFTER_MS: 250 }, 250],
+    [{ retry_after_milliseconds: 250 }, 250],
+    [{ retry_after_minutes: 5 }, 3e5],
+    [{ retryAfterHours: 2 }, 7.2e6],
+    [{ error: { details: [{ retryAfterSeconds: 120 }] } }, 1.2e5],
+    // A key that merely contains the words, or has an unknown suffix, is not a retry key.
+    [{ x_retry_after: 5 }, null],
+    [{ retry_after_foo: 5 }, null],
+    [{ retries_after: 5 }, null],
+    [{ unrelated: 5 }, null],
+    // retry_at: a moment as an epoch count (seconds; milliseconds for the Ms suffix).
+    [{ retry_at: epochSeconds }, 6e5],
+    [{ retry_at_seconds: epochSeconds }, 6e5],
+    [{ retryAtSeconds: epochSeconds }, 6e5],
+    [{ retry_at_ms: epochSeconds * 1000 }, 6e5],
+    [{ retryAtMs: epochSeconds * 1000 }, 6e5],
+    [{ retry_at: String(epochSeconds) }, 6e5],
+    [{ retry_at_minutes: 5 }, 3e5],
+    // A negative number is 0, never a negative wait.
+    [{ retry_after: -5 }, 0],
+    // Strings: a plain non-negative integer or decimal (scaled by the key's unit).
+    [{ retry_after: "900" }, 9e5],
+    [{ retry_after: "30.5" }, 30500],
+    [{ retry_after_ms: "250" }, 250],
+    // Strings: an HTTP-date, in each of the three RFC 9110 forms.
+    [{ retryAfter: "Fri, 13 Nov 2026 12:30:00 GMT" }, 1.8e6],
+    [{ retryAfter: "Friday, 13-Nov-26 12:30:00 GMT" }, 1.8e6],
+    [{ retryAfter: "Fri Nov 13 12:30:00 2026" }, 1.8e6],
+    // Strings: ISO 8601 with a zone (Z, +hh, +hhmm, +hh:mm, a negative zone), or no zone (UTC).
+    [{ retry_after: "2026-11-13T12:20:00Z" }, 1.2e6],
+    [{ retry_after: "2026-11-13T14:20:00+02:00" }, 1.2e6],
+    [{ retry_after: "2026-11-13T14:20:00+0200" }, 1.2e6],
+    [{ retry_after: "2026-11-13T14:20:00+02" }, 1.2e6],
+    [{ retry_after: "2026-11-13T07:20:00-05:00" }, 1.2e6],
+    [{ retry_after: "2026-11-13T12:20:00" }, 1.2e6],
+    [{ retry_after: "2026-11-13 12:20:00" }, 1.2e6],
+    [{ retry_after: "2026-11-13T12:00:30.500Z" }, 30500],
+    [{ retry_at: "2026-11-13T12:20:00Z" }, 1.2e6],
+    [{ retry_after: "2026-11-13T11:00:00Z" }, 0],
+    // Two keys: the longer.
+    [{ retry_after: 60, retryAfterSeconds: 600 }, 6e5],
+    // null states nothing.
+    [{ retry_after: null }, null],
+    // An object value: {secs, nanos}, {seconds} or {ms}.
+    [{ retry_after: { secs: 30, nanos: 0 } }, 3e4],
+    [{ retry_after: { secs: 1, nanos: 500_000_000 } }, 1500],
+    [{ retry_after: { seconds: 45 } }, 4.5e4],
+    [{ retry_after: { ms: 250 } }, 250],
+    // Anything else that is named but not readable is the cap: another object, an array, a
+    // boolean, a string that is not one of the forms above (durations, ranges, quoted numbers,
+    // negatives, a date with no time, an unread zone, a space before the zone, "null", "").
+    [{ retry_after: {} }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: { when: "soon" } }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: { secs: "30" } }, MAX_RETRY_AFTER_MS],
+    [{ retry_at: { secs: 30 } }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: [30] }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: true }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: false }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "soon" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "5 minutes" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "1h30m" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "5-10 minutes" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: '"30"' }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "-5" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "2026-11-13" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "2026-11-13 12:30 EST" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "2026-11-13T14:20:00 +02:00" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "2026-13-45T25:61:00Z" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "20s (request 41d4)" }, MAX_RETRY_AFTER_MS],
+    [{ retryAfter: "a 2-hour cooldown" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "null" }, MAX_RETRY_AFTER_MS],
+    [{ retry_after: "" }, MAX_RETRY_AFTER_MS],
+  ];
+  for (const [rpcData, expected] of rows) assert.equal(data(rpcData), expected, JSON.stringify(rpcData));
+  // Data and message together: the longer.
+  assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: 60 }, message: "Retry-After: 600" }, now), 6e5);
+  // A parsed wait always wins over a cap from the other side; a cap answers only when nothing parsed.
+  assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: 30 }, message: "Retry-After: soon" }, now), 3e4);
+  assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: { secs: 30, nanos: 0 } }, message: "Retry-After: soon" }, now), 3e4);
+  assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: [30] }, message: "Retry-After: 600" }, now), 6e5);
+  assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: "soon" }, message: "Retry-After: 600" }, now), 6e5);
+  assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: [30] }, message: "Retry-After: soon" }, now), MAX_RETRY_AFTER_MS);
+  assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: null }, message: "Retry-After: soon" }, now), MAX_RETRY_AFTER_MS);
+  assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: [30] }, message: "retry after 10 minutes" }, now), MAX_RETRY_AFTER_MS);
+  assert.equal(retryAfterMilliseconds({ rpcData: { retry_after: null }, message: "no Retry-After header was sent" }, now), null);
+  assert.equal(retryAfterMilliseconds({ rpcData: { unrelated: 1 }, message: "retry after 10 minutes" }, now), null);
+  // Depth is limited, a cycle ends, and a long string is cut (so it cannot parse).
+  let deep = { retry_after: 9999 };
+  for (let i = 0; i < 12; i += 1) deep = { nested: deep };
+  assert.equal(data(deep), null);
+  const loop = { retry_after: 30 };
+  loop.self = loop;
+  assert.equal(data(loop), 3e4);
+  assert.equal(data({ retry_after: `${"x".repeat(300)} 20` }), MAX_RETRY_AFTER_MS);
+  assert.equal(data({ retry_after: `20${" ".repeat(300)}` }), 2e4);
+});
+
+test("retry-after: hostile messages finish quickly and never throw", () => {
+  // CPU time, not wall time: at idle priority on a busy machine wall time stretches several-fold,
+  // while a catastrophic regex would take minutes of CPU, not seconds.
+  const started = process.cpuUsage();
+  assert.equal(retryAfterMilliseconds({ message: "retry after ".repeat(300_000) }, 0), null);
+  assert.equal(retryAfterMilliseconds({ message: "Retry-After: ".repeat(300_000) }, 0), MAX_RETRY_AFTER_MS);
+  assert.equal(retryAfterMilliseconds({ message: `retry after${" ".repeat(300_000)}5` }, 0), null);
+  assert.equal(retryAfterMilliseconds({ message: `Retry-After:${" ".repeat(300_000)}5` }, 0), 5000);
+  assert.equal(retryAfterMilliseconds({ message: `Retry-After: 5${" ".repeat(300_000)}x` }, 0), MAX_RETRY_AFTER_MS);
+  assert.equal(retryAfterMilliseconds({ message: "\n".repeat(1_000_000) }, 0), null);
+  assert.equal(retryAfterMilliseconds({ message: "Retry-After: 5\n".repeat(100_000) }, 0), 5000);
+  assert.equal(retryAfterMilliseconds({ message: '"retry-after":"'.repeat(100_000) }, 0), MAX_RETRY_AFTER_MS);
+  assert.equal(retryAfterMilliseconds({ message: `"retry-after": ${"a".repeat(1_000_000)}` }, 0), MAX_RETRY_AFTER_MS);
+  assert.equal(retryAfterMilliseconds({ message: `"retry-after":"${"a".repeat(1_000_000)}` }, 0), MAX_RETRY_AFTER_MS);
+  assert.equal(retryAfterMilliseconds({ message: `Retry-After: ${'"'.repeat(100_000)}5` }, 0), MAX_RETRY_AFTER_MS);
+  assert.equal(retryAfterMilliseconds({ message: `retry after ${"Mon".repeat(30_000)}` }, 0), null);
+  assert.equal(retryAfterMilliseconds({ message: `Retry-After: ${"Mon, 01 ".repeat(30_000)}` }, 0), MAX_RETRY_AFTER_MS);
+  const used = process.cpuUsage(started);
+  const cpuMs = (used.user + used.system) / 1000;
+  assert.ok(cpuMs < 3000, `took ${Math.round(cpuMs)} ms of CPU`);
+});
+
+test("a Retry-After header line of hours is capped at one hour by the caller, and a wait stated only in prose is not read", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const failed = await getUsageSnapshot({
+    codexHome: root,
+    now,
+    identity: ACCOUNT_IDENTITY,
+    fetcher: async () => { throw new Error("limited\nRetry-After: 10800"); },
+  });
+  assertDeadline(failed.nextAllowedAt, now + MAX_RETRY_AFTER_MS);
+  // The same wait stated only in prose is not read: the normal five-minute floor applies.
+  const prose = await getUsageSnapshot({
+    codexHome: await fixtureRoot(t),
+    now,
+    identity: ACCOUNT_IDENTITY,
+    fetcher: async () => { throw new Error("limited; retry after 3 hours"); },
+  });
+  assertDeadline(prose.nextAllowedAt, now + MIN_POLL_INTERVAL_MS);
+});
+
+test("a cache deadline beyond the longest possible backoff does not suppress polling", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const dataDir = join(root, "cache-statusband-codex");
+  await mkdir(dataDir, { recursive: true });
+  const name = `rate-limits-${createHash("sha256").update(ACCOUNT_IDENTITY.key).digest("hex").slice(0, 16)}.json`;
+  await writeFile(join(dataDir, name), JSON.stringify({ version: 3, identityKey: ACCOUNT_IDENTITY.key, availableCount: 9, nextAllowedAt: now + 10 * 60 * 60_000 }));
+  let calls = 0;
+  const snapshot = await getUsageSnapshot({ codexHome: root, now, identity: ACCOUNT_IDENTITY, fetcher: async () => { calls += 1; return RAW; } });
+  assert.equal(calls, 1);
+  assert.equal(snapshot.source, "live");
+  assert.equal(snapshot.availableCount, 2);
+});
+
+test("a different login is detected before any rate-limit request is made", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const log = join(root, "requests.log");
+  const fakeFetcher = (email) => (options) => fetchRateLimitsViaAppServer({
+    ...options,
+    command: process.execPath,
+    args: [FAKE_SERVER],
+    timeoutMs: 5_000,
+    env: { ...process.env, FAKE_SERVER_EMAIL: email, FAKE_SERVER_LOG: log },
+  });
+  const requests = async () => (await readFile(log, "utf8").catch(() => "")).split("\n").filter(Boolean);
+
+  // The expected account (A) is signed out in favour of B: only the account is read.
+  const mismatched = await getUsageSnapshot({ codexHome: root, now, identity: ACCOUNT_IDENTITY, fetcher: fakeFetcher(OTHER_EMAIL) });
+  assert.equal(mismatched.source, "stale");
+  assert.equal(mismatched.availableCount, null);
+  assert.equal(mismatched.accountEmail, null);
+  assert.deepEqual(await requests(), ["initialize", "initialized", "account/read"]);
+  // Nothing was stored for B, and A is backed off for the usual interval.
+  assert.equal((await readdir(join(root, "cache-statusband-codex"))).filter((name) => name.endsWith(".json")).length, 1);
+  // This read starts a real child process, which can take seconds on a loaded machine.
+  assertDeadline(mismatched.nextAllowedAt, now + MIN_POLL_INTERVAL_MS, 10_000);
+
+  // The same login, spelled in a different case, is the same account.
+  await rm(log);
+  const matched = await getUsageSnapshot({ codexHome: root, now: mismatched.nextAllowedAt, identity: ACCOUNT_IDENTITY, fetcher: fakeFetcher(TEST_EMAIL.toUpperCase()) });
+  assert.equal(matched.source, "live");
+  assert.equal(matched.availableCount, 2);
+  assert.deepEqual((await requests()).filter((name) => name === "account/rateLimits/read"), ["account/rateLimits/read"]);
+});
+
+test("banked-reset lines say how old a non-live reading is", () => {
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const base = { availableCount: 2, credits: null };
+  assert.equal(formatUsageLines({ ...base, source: "live", fetchedAt: now }, now)[0], "Banked resets: 2");
+  assert.equal(formatUsageLines({ ...base, source: "cache", fetchedAt: now - MIN_POLL_INTERVAL_MS }, now)[0], "Banked resets: 2");
+  assert.equal(formatUsageLines({ ...base, source: "cache", fetchedAt: now - 3 * MIN_POLL_INTERVAL_MS }, now)[0], "Banked resets: 2 (checked 15m ago)");
+  assert.equal(formatUsageLines({ ...base, source: "stale", fetchedAt: now - 60_000 }, now)[0], "Banked resets: 2 (checked 1m ago)");
+  assert.equal(formatUsageLines({ ...base, source: "stale" }, now)[0], "Banked resets: 2 (check time unknown)");
+});
+
+test("local dates use a plain space before AM/PM", () => {
+  const [, detail] = formatUsageLines(
+    { availableCount: 1, credits: [{ title: "Reset", expiresAt: Date.parse("2026-10-29T20:22:00.000Z") / 1000 }] },
+    Date.parse("2026-10-29T12:00:00.000Z"),
+    { includeResetDetails: true, locale: "en-US", timeZone: "UTC" },
+  );
+  assert.doesNotMatch(detail, /[\u202f\u00a0]/);
+});
+
+async function fixtureRoot(t) {
+  const root = await mkdtemp(join(tmpdir(), "cache-statusband-usage-"));
+  // Retried: a just-stopped server (or the cmd.exe that ran it from a fixture folder) can hold a
+  // folder or file here for a moment.
+  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+  return root;
+}
+
+test("a cache-only snapshot reports what is stored and records no attempt", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const dataDir = join(root, "cache-statusband-codex");
+  const name = `rate-limits-${createHash("sha256").update(ACCOUNT_IDENTITY.key).digest("hex").slice(0, 16)}.json`;
+  const fetcher = async () => { throw new Error("must not read"); };
+
+  // Nothing stored: empty, and nothing written (not even the cache folder).
+  const empty = await getUsageSnapshot({ codexHome: root, now, identity: ACCOUNT_IDENTITY, fetcher, cacheOnly: true });
+  assert.equal(empty.availableCount, null);
+  await assert.rejects(access(dataDir));
+  await mkdir(dataDir);
+
+  // An expired reading is shown as stale and the file is untouched.
+  const stored = JSON.stringify({ version: 3, identityKey: ACCOUNT_IDENTITY.key, accountEmail: TEST_EMAIL, availableCount: 4, fetchedAt: now - 3_600_000, nextAllowedAt: now - 1000, lastErrorAt: null });
+  await writeFile(join(dataDir, name), stored);
+  const stale = await getUsageSnapshot({ codexHome: root, now, identity: ACCOUNT_IDENTITY, fetcher, cacheOnly: true });
+  assert.equal(stale.availableCount, 4);
+  assert.equal(stale.source, "stale");
+  assert.equal(await readFile(join(dataDir, name), "utf8"), stored);
+  assert.deepEqual((await readdir(dataDir)).sort(), [name]);
+});
+
+test("a % codex.cmd earlier on PATH is skipped when a usable codex.exe comes later", { skip: process.platform !== "win32" }, async (t) => {
+  const root = await fixtureRoot(t);
+  const bad = join(root, "100%PATH%");
+  const good = join(root, "good");
+  await mkdir(bad);
+  await mkdir(good);
+  await writeFile(join(bad, "codex.cmd"), "");
+  await writeFile(join(good, "codex.exe"), "");
+  assert.equal(resolveCodexLaunch({ PATH: `${bad}${delimiter}${good}` }, "win32").command, join(good, "codex.exe"));
+  // Nothing usable anywhere: the refusal still names the problem.
+  assert.throws(() => resolveCodexLaunch({ PATH: bad }, "win32"), /cannot safely run a path containing "%"/);
+  // A % in the directory only matters to the cmd.exe wrapper.
+  await writeFile(join(bad, "codex.exe"), "");
+  assert.equal(resolveCodexLaunch({ PATH: bad }, "win32").command, join(bad, "codex.exe"));
+});
+
+test("the CLI says once, on stderr, why an unlaunchable Codex cannot be read", { skip: process.platform !== "win32" }, async (t) => {
+  const root = await fixtureRoot(t);
+  const bad = join(root, "100%PATH%");
+  await mkdir(bad);
+  await writeFile(join(bad, "codex.cmd"), "");
+  const bin = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "cache-statusband-codex.mjs");
+  for (const command of ["usage", "board"]) {
+    const { stdout, stderr } = await promisify(execFile)(process.execPath, [bin, command, "--codex-home", root], {
+      env: { ...process.env, CODEX_BIN: join(bad, "codex.cmd") },
+      timeout: 20_000,
+    });
+    assert.equal(stderr.split("cannot safely run a path containing").length - 1, 1, stderr);
+    assert.match(stderr, /CODEX_BIN/);
+    // No account can be verified, so no cached or invented usage: just the unavailable header.
+    const header = "Banked resets: unavailable\n";
+    assert.equal(stdout, command === "usage" ? header : `${header}\nNo Codex rollout transcripts found under ${root}.\n`);
+  }
+});
+
+test("a server that has already exited is not signalled again, but a live one is stopped", async (t) => {
+  const root = await fixtureRoot(t);
+  const killed = [];
+  const spawnKiller = (...call) => {
+    killed.push(call);
+    const fake = new EventEmitter();
+    setImmediate(() => fake.emit("exit", 0));
+    return fake;
+  };
+  // Exits by itself a moment after start: its pid may be reused, so nothing may target it.
+  const brief = { command: process.execPath, args: ["-e", "process.stdin.resume(); setTimeout(() => process.exit(0), 300)"] };
+  for (const reader of [readAccountViaAppServer, fetchRateLimitsViaAppServer]) {
+    await assert.rejects(reader({ codexHome: root, ...brief, platform: "win32", spawnKiller, timeoutMs: 5_000, expectedEmail: FAKE_EMAIL }), /exited before/);
+  }
+  assert.deepEqual(killed, []);
+  // A server still running when the read ends is taken down with its whole process tree.
+  const pidFile = join(root, "live.pid");
+  const env = { ...process.env, HUNG_PID_FILE: pidFile };
+  await assert.rejects(readAccountViaAppServer({ codexHome: root, command: process.execPath, args: [HUNG_SERVER], env, platform: "win32", spawnKiller, timeoutMs: 400 }), /timed out/);
+  try {
+    assert.equal(killed.length, 1);
+    // By full path: a bare "taskkill" would be looked for in the current folder first.
+    assert.ok(/[\\/]System32[\\/]taskkill\.exe$/i.test(killed[0][0]) && win32.isAbsolute(killed[0][0]), killed[0][0]);
+    assert.deepEqual(killed[0][1].slice(2), ["/T", "/F"]);
+  } finally {
+    // The faked killer never stopped the real server, and it may still be starting up:
+    // wait for its pid file, then take it down so it cannot outlive the test.
+    await waitUntil(async () => (await readFile(pidFile, "utf8").catch(() => "")) !== "", 3_000);
+    const pid = Number(await readFile(pidFile, "utf8").catch(() => 0));
+    if (pid && alive(pid)) {
+      if (process.platform === "win32") await promisify(execFile)("taskkill", ["/PID", String(pid), "/T", "/F"]).catch(() => {});
+      else process.kill(pid);
+    }
+  }
+});
+
+test("a Codex home that does not exist is never created by usage, board or the session-state writers", async (t) => {
+  const parent = await fixtureRoot(t);
+  const home = join(parent, "no-such-codex-home");
+  const stillMissing = async (what) => assert.deepEqual((await readdir(parent)).filter((name) => name === "no-such-codex-home"), [], `${what} created the home`);
+  const fetcher = async () => { throw new Error("must not read"); };
+
+  // Both the normal and the cache-only paths take the "cannot update the cache" answer.
+  const snapshot = await getUsageSnapshot({ codexHome: home, identity: ACCOUNT_IDENTITY, fetcher });
+  assert.equal(snapshot.cacheUnwritable, true);
+  assert.equal(snapshot.availableCount, null);
+  await stillMissing("getUsageSnapshot");
+  await getUsageSnapshot({ codexHome: home, identity: ACCOUNT_IDENTITY, fetcher, cacheOnly: true });
+  await stillMissing("getUsageSnapshot (cacheOnly)");
+  // No identity: nothing is created before the identity is known either.
+  assert.equal((await getUsageSnapshot({ codexHome: home, identity: null, fetcher })).source, "identity-unavailable");
+  await stillMissing("getUsageSnapshot (no identity)");
+
+  // The session-state writers: a missing home is not created, a failed identity record falls
+  // back to the login just read, and a failed Stop save throws (the hook swallows it).
+  const identity = await getSessionIdentity(home, "missing-home-session", async () => ACCOUNT_IDENTITY);
+  assert.equal(identity.key, ACCOUNT_IDENTITY.key);
+  await stillMissing("getSessionIdentity");
+  const summary = { contextUsed: 10, contextWindow: 100, updatedAt: "2026-10-29T12:00:00.000Z" };
+  await assert.rejects(saveSessionState(home, "missing-home-session", summary), { code: "ENOENT" });
+  await stillMissing("saveSessionState");
+
+  // The CLI, with a fake app-server that signs in an account (the CLI must not even ask it).
+  const here = dirname(fileURLToPath(import.meta.url));
+  const bin = join(here, "..", "bin", "cache-statusband-codex.mjs");
+  const server = join(here, "..", "fixtures", "fake-app-server.mjs");
+  const windows = process.platform === "win32";
+  const wrapper = join(parent, windows ? "codex.cmd" : "codex");
+  await writeFile(wrapper, windows
+    ? `@echo off\r\n"${process.execPath}" "${server}" %*\r\n`
+    : `#!/bin/sh\nexec "${process.execPath}" "${server}" "$@"\n`, { mode: 0o755 });
+  const requestLog = join(parent, "requests.log");
+  for (const args of [["usage"], ["usage", "--json"], ["board"], ["board", "--json"]]) {
+    const { stdout, stderr } = await promisify(execFile)(process.execPath, [bin, ...args, "--codex-home", home], {
+      env: { ...process.env, CODEX_BIN: wrapper, CACHE_STATUSBAND_CODEX_SEAT_FILE: "", FAKE_SERVER_LOG: requestLog },
+      timeout: 20_000,
+    });
+    await assert.rejects(access(requestLog), `${args.join(" ")}: the app-server was asked something`);
+    // One line says the home is missing (the app-server is never started for it), and nothing
+    // says the cache cannot be updated.
+    assert.equal(stderr, `cache-statusband-codex: usage not read: the Codex home ${home} does not exist
+`, `${args.join(" ")}: ${stderr}`);
+    assert.ok(stdout.length > 0);
+    await stillMissing(`cache-statusband-codex ${args.join(" ")}`);
+  }
+});
+
+// Only ENOENT and ENOTDIR mean the home does not exist; any other stat error falls through to the
+// normal path (which reports what is really wrong). A seat that is configured but unreadable
+// keeps the CLI silent even for a missing home.
+test("a missing Codex home: only ENOENT/ENOTDIR say so, and an unavailable seat stays silent", async (t) => {
+  const stat = (code) => () => { throw Object.assign(new Error(code), { code }); };
+  assert.equal(codexHomeIsMissing("x", stat("ENOENT")), true);
+  assert.equal(codexHomeIsMissing("x", stat("ENOTDIR")), true);
+  for (const code of ["EACCES", "EPERM", "ENAMETOOLONG", "EBUSY", "UNKNOWN"]) assert.equal(codexHomeIsMissing("x", stat(code)), false, code);
+  assert.equal(codexHomeIsMissing("x", () => ({})), false);
+  assert.equal(codexHomeIsMissing(dirname(fileURLToPath(import.meta.url))), false);
+
+  const parent = await fixtureRoot(t);
+  const here = dirname(fileURLToPath(import.meta.url));
+  const bin = join(here, "..", "bin", "cache-statusband-codex.mjs");
+  const home = join(parent, "no-such-home");
+  const emptySeat = join(parent, "empty-seat.txt");
+  await writeFile(emptySeat, "");
+  for (const args of [["usage"], ["board"]]) {
+    const { stdout, stderr } = await promisify(execFile)(process.execPath, [bin, ...args, "--codex-home", home], {
+      env: { ...process.env, CACHE_STATUSBAND_CODEX_SEAT_FILE: emptySeat },
+      timeout: 20_000,
+    });
+    assert.equal(stderr, "", `${args.join(" ")} with an unavailable seat said: ${stderr}`);
+    assert.ok(stdout.length > 0);
+  }
+  // Without a seat the same missing home is named.
+  const { stderr } = await promisify(execFile)(process.execPath, [bin, "usage", "--codex-home", home], {
+    env: { ...process.env, CACHE_STATUSBAND_CODEX_SEAT_FILE: "" },
+    timeout: 20_000,
+  });
+  assert.match(stderr, /the Codex home .* does not exist\n$/);
+});
+
+test("an account reader that throws because the seat became unavailable is flagged seatUnavailable", async (t) => {
+  const root = await fixtureRoot(t);
+  const seatFile = join(root, "seat.txt");
+  const boom = () => Object.assign(new Error("read failed"), { code: "EPIPE" });
+
+  // No seat at the start; the seat file is configured but empty by the time the reader fails.
+  const env = {};
+  await writeFile(seatFile, "");
+  await assert.rejects(
+    captureUsageIdentity(root, { env, throwOnFailure: true, accountReader: async () => { env.CACHE_STATUSBAND_CODEX_SEAT_FILE = seatFile; throw boom(); } }),
+    (error) => error.seatUnavailable === true && error.code === "EPIPE",
+  );
+  // A reader that fails with the seat still absent is a plain failure.
+  await assert.rejects(
+    captureUsageIdentity(root, { env: {}, throwOnFailure: true, accountReader: async () => { throw boom(); } }),
+    (error) => error.seatUnavailable === undefined && error.code === "EPIPE",
+  );
+  // A seat configured and readable at the start whose file empties before the reader fails.
+  const env2 = { CACHE_STATUSBAND_CODEX_SEAT_FILE: seatFile };
+  await writeFile(seatFile, "alpha");
+  await assert.rejects(
+    captureUsageIdentity(root, { env: env2, throwOnFailure: true, accountReader: async () => { await writeFile(seatFile, ""); throw boom(); } }),
+    (error) => error.seatUnavailable === true && error.code === "EPIPE",
+  );
+  // ...and one whose seat stays readable is a plain failure.
+  await writeFile(seatFile, "alpha");
+  await assert.rejects(
+    captureUsageIdentity(root, { env: env2, throwOnFailure: true, accountReader: async () => { throw boom(); } }),
+    (error) => error.seatUnavailable === undefined && error.code === "EPIPE",
+  );
+});
+
+test("a cached reading of the wrong shape is no reading, and never makes the output throw", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const dataDir = join(root, "cache-statusband-codex");
+  const name = `rate-limits-${createHash("sha256").update(ACCOUNT_IDENTITY.key).digest("hex").slice(0, 16)}.json`;
+  const fetcher = async () => { throw new Error("must not read"); };
+  await mkdir(dataDir);
+  for (const bad of [{ credits: {} }, { credits: "x" }, { credits: [null] }, { credits: [[]] }, { primary: "x" }, { secondary: [] }]) {
+    await writeFile(join(dataDir, name), JSON.stringify({ version: 3, identityKey: ACCOUNT_IDENTITY.key, accountEmail: TEST_EMAIL, availableCount: 4, fetchedAt: now - 1000, nextAllowedAt: now + 60_000, lastErrorAt: null, ...bad }));
+    const snapshot = await getUsageSnapshot({ codexHome: root, now, identity: ACCOUNT_IDENTITY, fetcher, cacheOnly: true });
+    assert.equal(snapshot.availableCount, null, JSON.stringify(bad));
+    assert.doesNotThrow(() => formatUsageLines(snapshot, now, { includeResetDetails: true, locale: "en-US", timeZone: "UTC" }));
+  }
+});
+
+test("an npm codex.cmd never runs a node.exe planted in the caller's folder", { skip: process.platform !== "win32" && "Windows only" }, async (t) => {
+  const root = await fixtureRoot(t);
+  const bin = join(root, "npm-bin");
+  const project = join(root, "project");
+  const marker = join(root, "ran-with.txt");
+  await mkdir(bin);
+  await mkdir(project);
+  // The server records which node ran it, then exits (the read fails; only who ran matters).
+  const server = join(root, "record-exec.mjs");
+  await writeFile(server, `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, process.execPath);\n`);
+  // npm's own template: a node.exe beside the wrapper, else a bare "node".
+  await writeFile(join(bin, "codex.cmd"), `@ECHO off\r\nSETLOCAL\r\nSET dp0=%~dp0\r\nIF EXIST "%dp0%\\node.exe" (SET "_prog=%dp0%\\node.exe") ELSE (SET "_prog=node")\r\n"%_prog%" "${server}" %*\r\n`);
+  // The planted copy is a real node, so it would run the script too and record its own path.
+  const planted = join(project, "node.exe");
+  await copyFile(process.execPath, planted);
+  const script = join(root, "call-reader.mjs");
+  await writeFile(script, [
+    `import { readAccountViaAppServer } from ${JSON.stringify(pathToFileURL(USAGE_MODULE).href)};`,
+    `try { await readAccountViaAppServer({ codexHome: ${JSON.stringify(root)}, timeoutMs: 5000 }); } catch (error) { console.log(error.message); }`,
+  ].join("\n"));
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === "path" || key.toLowerCase() === "nodefaultcurrentdirectoryinexepath" || key.toLowerCase() === "codex_bin") delete env[key];
+  }
+  env.Path = `${bin}${delimiter}${dirname(process.execPath)}${delimiter}${windowsSystemExe("", process.env)}`;
+  const { stdout } = await promisify(execFile)(process.execPath, [script], { cwd: project, env, windowsHide: true, timeout: 20_000 });
+  const ranWith = await readFile(marker, "utf8").catch(() => assert.fail(`the server never ran: ${stdout}`));
+  assert.notEqual(ranWith.toLowerCase(), planted.toLowerCase(), "the planted node.exe in the caller's folder ran");
+});
+
+test("a stored cacheUnwritable or cacheDir is never shown as this call's state", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const dataDir = join(root, "cache-statusband-codex");
+  const name = `rate-limits-${createHash("sha256").update(ACCOUNT_IDENTITY.key).digest("hex").slice(0, 16)}.json`;
+  await mkdir(dataDir);
+  await writeFile(join(dataDir, name), JSON.stringify({ version: 3, identityKey: ACCOUNT_IDENTITY.key, accountEmail: TEST_EMAIL, availableCount: 4, fetchedAt: now - 1000, nextAllowedAt: now + 60_000, lastErrorAt: null, cacheUnwritable: true, cacheDir: "C:\\elsewhere" }));
+  const snapshot = await getUsageSnapshot({ codexHome: root, now, identity: ACCOUNT_IDENTITY, fetcher: async () => { throw new Error("must not read"); }, cacheOnly: true });
+  assert.equal(snapshot.availableCount, 4);
+  assert.notEqual(snapshot.cacheUnwritable, true);
+  assert.notEqual(snapshot.cacheDir, "C:\\elsewhere");
+});
+
+test("two captures of one email in different capitalisation share one cache and deadline", async () => {
+  const root = await mkdtemp(join(tmpdir(), "csb-email-case-"));
+  try {
+    const now = Date.parse("2026-10-29T12:00:00.000Z");
+    let calls = 0;
+    let email = TEST_EMAIL.toUpperCase();
+    const accountReader = async () => ({ email });
+    const fetcher = async () => { calls += 1; return { ...RAW, account: { email } }; };
+    const upper = await captureUsageIdentity(root, { env: {}, accountReader });
+    assert.equal(upper.key, `account:${TEST_EMAIL.toLowerCase()}`);
+    assert.equal(upper.label, TEST_EMAIL.toUpperCase());
+    await getUsageSnapshot({ codexHome: root, now, fetcher, env: {}, identity: upper });
+    email = TEST_EMAIL;
+    const lower = await captureUsageIdentity(root, { env: {}, accountReader });
+    assert.equal(lower.key, upper.key);
+    const second = await getUsageSnapshot({ codexHome: root, now: now + 1_000, fetcher, env: {}, identity: lower });
+    assert.equal(second.source, "cache");
+    assert.equal(calls, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("identities and caches saved before keys were case-folded are adopted under the folded key", async () => {
+  const root = await mkdtemp(join(tmpdir(), "csb-email-old-"));
+  try {
+    const mixed = TEST_EMAIL.replace(/^p/, "P");
+    const oldIdentity = { key: `account:${mixed}`, label: mixed, unavailable: false };
+    // A session recorded by an older build loads with its key folded.
+    await getSessionIdentity(root, "old-session", async () => oldIdentity);
+    const loaded = await getSessionIdentity(root, "old-session", async () => { throw new Error("must not capture"); });
+    assert.equal(loaded.key, `account:${TEST_EMAIL}`);
+    assert.equal(loaded.label, mixed);
+    // A cache an older build wrote under the unfolded key still holds the deadline.
+    const now = Date.parse("2026-10-29T12:00:00.000Z");
+    let calls = 0;
+    const fetcher = async () => { calls += 1; return { ...RAW, account: { email: mixed } }; };
+    await getUsageSnapshot({ codexHome: root, now, fetcher, env: {}, identity: oldIdentity });
+    assert.equal(calls, 1);
+    const again = await getUsageSnapshot({ codexHome: root, now: now + 1_000, fetcher, env: {}, identity: loaded });
+    assert.equal(again.source, "cache");
+    assert.equal(again.identityKey, loaded.key);
+    assert.equal(calls, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a seat session keeps the unfolded key, so an older build's cache and backoff still apply", async () => {
+  const root = await mkdtemp(join(tmpdir(), "csb-email-seat-old-"));
+  try {
+    const mixed = TEST_EMAIL.replace(/^p/, "P");
+    const folded = `account:${TEST_EMAIL}`;
+    const oldIdentity = { key: `account:${mixed}`, label: "Seat A", unavailable: false };
+    // Resumed: the record an older build saved still names the cache it wrote.
+    await getSessionIdentity(root, "seat-old", async () => oldIdentity);
+    const resumed = await getSessionIdentity(root, "seat-old", async () => { throw new Error("must not capture"); });
+    assert.equal(resumed.key, folded);
+    assert.equal(resumed.unfoldedKey, `account:${mixed}`);
+    const now = Date.parse("2026-10-29T12:00:00.000Z");
+    let calls = 0;
+    const fetcher = async () => { calls += 1; return { ...RAW, account: { email: mixed } }; };
+    await getUsageSnapshot({ codexHome: root, now, fetcher, env: {}, identity: oldIdentity });
+    assert.equal(calls, 1);
+    const again = await getUsageSnapshot({ codexHome: root, now: now + 1_000, fetcher, env: {}, identity: resumed });
+    assert.equal(again.source, "cache");
+    assert.equal(again.identityKey, folded);
+    assert.equal(calls, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a shared legacy cache written under a capitalised key is adopted under the folded key", async () => {
+  const root = await mkdtemp(join(tmpdir(), "csb-email-legacy-"));
+  try {
+    const mixed = TEST_EMAIL.replace(/^p/, "P");
+    const now = Date.parse("2026-10-29T12:00:00.000Z");
+    let calls = 0;
+    const fetcher = async () => { calls += 1; return { ...RAW, account: { email: mixed } }; };
+    // Write a cache under the capitalised key, then move it to the shared legacy name.
+    await getUsageSnapshot({ codexHome: root, now, fetcher, env: {}, identity: { key: `account:${mixed}`, label: mixed, unavailable: false } });
+    const dir = join(root, "cache-statusband-codex");
+    const written = (await readdir(dir)).find((name) => /^rate-limits-.*\.json$/.test(name));
+    await writeFile(join(dir, "rate-limits.json"), await readFile(join(dir, written), "utf8"), "utf8");
+    await rm(join(dir, written));
+    const identity = { key: `account:${TEST_EMAIL}`, label: TEST_EMAIL, unavailable: false };
+    const adopted = await getUsageSnapshot({ codexHome: root, now: now + 1_000, fetcher, env: {}, identity });
+    assert.equal(adopted.source, "cache");
+    assert.equal(adopted.identityKey, identity.key);
+    assert.equal(calls, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an older build's per-account cache wins over the older shared file, so its backoff holds", async () => {
+  const root = await mkdtemp(join(tmpdir(), "csb-email-both-"));
+  try {
+    const mixed = TEST_EMAIL.replace(/^p/, "P");
+    const unfolded = { key: `account:${mixed}`, label: mixed, unavailable: false };
+    const now = Date.parse("2026-10-29T12:00:00.000Z");
+    let calls = 0;
+    const fetcher = async () => { calls += 1; return { ...RAW, account: { email: mixed } }; };
+    const dir = join(root, "cache-statusband-codex");
+    // The oldest build's shared file: an old reading, long stale.
+    await getUsageSnapshot({ codexHome: root, now: now - 3 * 86_400_000, fetcher, env: {}, identity: unfolded });
+    const perAccount = (await readdir(dir)).find((name) => /^rate-limits-.*\.json$/.test(name));
+    await writeFile(join(dir, "rate-limits.json"), await readFile(join(dir, perAccount), "utf8"), "utf8");
+    // The next build's per-account file: a recent reading still inside its deadline.
+    await getUsageSnapshot({ codexHome: root, now, fetcher, env: {}, identity: unfolded });
+    assert.equal(calls, 2);
+    const identity = { key: `account:${TEST_EMAIL}`, label: mixed, unavailable: false, unfoldedKey: unfolded.key };
+    const adopted = await getUsageSnapshot({ codexHome: root, now: now + 1_000, fetcher, env: {}, identity });
+    assert.equal(adopted.source, "cache");
+    assert.equal(calls, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("account keys fold ASCII capitals only, so a Kelvin sign is not read as a k", async () => {
+  const root = await mkdtemp(join(tmpdir(), "csb-email-kelvin-"));
+  try {
+    let email = "\u212Aate@example.invalid";
+    const accountReader = async () => ({ email });
+    const kelvin = await captureUsageIdentity(root, { env: {}, accountReader });
+    email = "Kate@example.invalid";
+    const ascii = await captureUsageIdentity(root, { env: {}, accountReader });
+    assert.equal(ascii.key, "account:kate@example.invalid");
+    assert.notEqual(kelvin.key, ascii.key);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a saved session identity folds its key exactly as a fresh capture does", async () => {
+  const root = await mkdtemp(join(tmpdir(), "csb-fold-same-"));
+  try {
+    for (const [index, email] of ["\u212Aate@example.invalid", "\u00DCnal@Example.invalid", "Kate@example.invalid"].entries()) {
+      const captured = await captureUsageIdentity(root, { env: {}, accountReader: async () => ({ email }) });
+      await getSessionIdentity(root, `fold-${index}`, async () => captured);
+      const loaded = await getSessionIdentity(root, `fold-${index}`, async () => { throw new Error("must not capture"); });
+      assert.equal(loaded.key, captured.key);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a relative Retry-After counts from when the failure arrived, not from before the read", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const fetcher = async () => {
+    await new Promise((done) => setTimeout(done, 400));
+    throw Object.assign(new Error("limited"), { rpcData: { retry_after: 600 } });
+  };
+  const failed = await getUsageSnapshot({ codexHome: root, now, fetcher, identity: ACCOUNT_IDENTITY });
+  // The read took ~400 ms, so the 600 s wait must end at least that much after `now + 600 s`.
+  assert.ok(failed.nextAllowedAt >= now + 600_000 + 350, `nextAllowedAt is only ${failed.nextAllowedAt - now} ms after the read began`);
+  assert.ok(failed.lastErrorAt >= now + 350);
+});
+
+test("time spent before the read (a slow attempt-marker write) is not deducted from a Retry-After", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  let slowed = false;
+  const renameImpl = async (from, to) => {
+    if (!slowed) { slowed = true; await new Promise((done) => setTimeout(done, 400)); }
+    return rename(from, to);
+  };
+  const fetcher = async () => { throw Object.assign(new Error("limited"), { rpcData: { retry_after: 600 } }); };
+  const failed = await getUsageSnapshot({ codexHome: root, now, fetcher, identity: ACCOUNT_IDENTITY, renameImpl });
+  assert.ok(failed.nextAllowedAt >= now + 600_000 + 350, `nextAllowedAt is only ${failed.nextAllowedAt - now} ms after the call began`);
+});
+
+test("a line that is the JSON literal null does not crash either app-server reader", async () => {
+  // Prints `null`, then exits: the read must fail normally rather than throw out of the listener.
+  const script = "process.stdout.write('null' + String.fromCharCode(10)); setTimeout(() => process.exit(3), 200);";
+  for (const reader of [readAccountViaAppServer, fetchRateLimitsViaAppServer]) {
+    await assert.rejects(
+      reader({ codexHome: tmpdir(), command: process.execPath, args: ["-e", script], timeoutMs: 5_000, env: process.env, expectedEmail: TEST_EMAIL }),
+      /exited before/,
+    );
+  }
+});
+
+// Windows only: an ACL that denies this user read access is the one dependable way to make a
+// file exist but fail to read.
+async function denyRead(path, deny) {
+  const who = `${process.env.USERNAME}:(R)`;
+  await promisify(execFile)("icacls", deny ? [path, "/deny", who] : [path, "/remove:d", process.env.USERNAME]);
+}
+
+test("an unreadable cache file for this account makes no live read; an unreadable older shared file does not stop one", { skip: process.platform !== "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "csb-unreadable-"));
+  const dir = join(root, "cache-statusband-codex");
+  const denied = [];
+  try {
+    const now = Date.parse("2026-10-29T12:00:00.000Z");
+    let calls = 0;
+    const limited = async () => {
+      calls += 1;
+      const error = new Error("limited");
+      error.rpcData = { retry_after: 900 };
+      throw error;
+    };
+    await getUsageSnapshot({ codexHome: root, now, fetcher: limited, env: {}, identity: ACCOUNT_IDENTITY });
+    const scoped = join(dir, (await readdir(dir)).find((name) => /^rate-limits-.*\.json$/.test(name)));
+    await denyRead(scoped, true);
+    denied.push(scoped);
+    const blocked = await getUsageSnapshot({ codexHome: root, now: now + 10 * 60_000, fetcher: limited, env: {}, identity: ACCOUNT_IDENTITY });
+    assert.equal(blocked.source, "cache-busy");
+    assert.equal(calls, 1, "a read was made although this account's stored backoff could not be read");
+
+    // Another account, whose own file is absent: an unreadable shared file from an older build is
+    // skipped, not taken as a reason to stop.
+    const legacy = join(dir, "rate-limits.json");
+    await writeFile(legacy, "{}", "utf8");
+    await denyRead(legacy, true);
+    denied.push(legacy);
+    let otherCalls = 0;
+    const other = { key: `account:${OTHER_EMAIL}`, label: OTHER_EMAIL, unavailable: false };
+    const live = await getUsageSnapshot({ codexHome: root, now, fetcher: async () => { otherCalls += 1; return { ...RAW, account: { email: OTHER_EMAIL } }; }, env: {}, identity: other });
+    assert.equal(live.source, "live");
+    assert.equal(otherCalls, 1);
+  } finally {
+    for (const path of denied) await denyRead(path, false).catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  }
+});
