@@ -50,18 +50,19 @@ export async function getUsageSnapshot({
   const cachePath = join(dataDir, `rate-limits${suffix}.json`);
   const lockPath = join(dataDir, `rate-limits${suffix}.lock`);
   const legacyPath = join(dataDir, "rate-limits.json");
-  // A cache file that exists but cannot be read (anything but "not found") hides a stored
-  // backoff and the last good reading, so it is treated like a busy cache: no live read.
-  const readStored = async () => {
+  // This account's own cache file existing but unreadable (anything but "not found") would
+  // hide a stored backoff and the last good reading. Only the re-read under the lock decides
+  // that, and only for that one file: a brief read error before the lock, or an unreadable
+  // file an older build left behind, is not allowed to stop the read.
+  const readStored = async (strict) => {
     try {
-      return alignCache(await readScopedCache(cachePath, legacyPath, identity), identity);
+      return alignCache(await readScopedCache(cachePath, legacyPath, identity, strict), identity);
     } catch (error) {
       if (error?.cacheUnreadable) return null;
       throw error;
     }
   };
-  let aligned = await readStored();
-  if (!aligned) return show(null, "cache-busy");
+  let aligned = await readStored(false);
   let cached = aligned.cache;
   if (fresh(cached, now) && !cached?.migrateSeatDeadline) return show(cached, aligned.mismatch ? "identity-changed" : "cache");
   if (cacheOnly) {
@@ -108,7 +109,7 @@ export async function getUsageSnapshot({
     return show(cached ? stored : null, aligned.mismatch ? "identity-changed" : "cache-busy");
   }
   try {
-    aligned = await readStored();
+    aligned = await readStored(true);
     if (!aligned) return show(null, "cache-busy");
     cached = aligned.cache;
     if (fresh(cached, now)) {
@@ -757,7 +758,7 @@ function fresh(cache, now) {
   return Number.isFinite(cache?.nextAllowedAt) && now < cache.nextAllowedAt && cache.nextAllowedAt <= now + MAX_RETRY_AFTER_MS + CLOCK_SLACK_MS;
 }
 
-async function readCache(path) {
+async function readCache(path, strict = false) {
   try {
     const value = JSON.parse(await readFile(path, "utf8"));
     if (value?.version !== CACHE_VERSION || !wellFormedCache(value)) return null;
@@ -767,9 +768,9 @@ async function readCache(path) {
     return value;
   } catch (error) {
     // Not found, a folder where the file belongs (or a file where the folder belongs), or not
-    // valid JSON: no stored reading, and the cache is then reported unwritable. Any other read
-    // failure is reported, so it is not mistaken for an absent backoff.
-    if (error?.code && !["ENOENT", "EISDIR", "ENOTDIR"].includes(error.code)) throw Object.assign(error, { cacheUnreadable: true });
+    // valid JSON: no stored reading. Any other read failure of a strict read (this account's
+    // file, under the lock) is reported, so it is not mistaken for an absent backoff.
+    if (strict && error?.code && !["ENOENT", "EISDIR", "ENOTDIR"].includes(error.code)) throw Object.assign(error, { cacheUnreadable: true });
     return null;
   }
 }
@@ -782,8 +783,8 @@ function wellFormedCache(value) {
   return record(value.primary) && record(value.secondary);
 }
 
-async function readScopedCache(path, legacyPath, identity) {
-  const scoped = await readCache(path);
+async function readScopedCache(path, legacyPath, identity, strict = false) {
+  const scoped = await readCache(path, strict);
   if (scoped || path === legacyPath) return scoped;
   // Best effort for files unreleased branch builds wrote before account keys were case-folded:
   // the first file found under the capture's original-case key, then the shared file, is

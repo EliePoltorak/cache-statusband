@@ -1469,3 +1469,48 @@ test("a line that is the JSON literal null does not crash either app-server read
     );
   }
 });
+
+// Windows only: an ACL that denies this user read access is the one dependable way to make a
+// file exist but fail to read.
+async function denyRead(path, deny) {
+  const who = `${process.env.USERNAME}:(R)`;
+  await promisify(execFile)("icacls", deny ? [path, "/deny", who] : [path, "/remove:d", process.env.USERNAME]);
+}
+
+test("an unreadable cache file for this account makes no live read; an unreadable older shared file does not stop one", { skip: process.platform !== "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "csb-unreadable-"));
+  const dir = join(root, "cache-statusband-codex");
+  const denied = [];
+  try {
+    const now = Date.parse("2026-10-29T12:00:00.000Z");
+    let calls = 0;
+    const limited = async () => {
+      calls += 1;
+      const error = new Error("limited");
+      error.rpcData = { retry_after: 900 };
+      throw error;
+    };
+    await getUsageSnapshot({ codexHome: root, now, fetcher: limited, env: {}, identity: ACCOUNT_IDENTITY });
+    const scoped = join(dir, (await readdir(dir)).find((name) => /^rate-limits-.*\.json$/.test(name)));
+    await denyRead(scoped, true);
+    denied.push(scoped);
+    const blocked = await getUsageSnapshot({ codexHome: root, now: now + 10 * 60_000, fetcher: limited, env: {}, identity: ACCOUNT_IDENTITY });
+    assert.equal(blocked.source, "cache-busy");
+    assert.equal(calls, 1, "a read was made although this account's stored backoff could not be read");
+
+    // Another account, whose own file is absent: an unreadable shared file from an older build is
+    // skipped, not taken as a reason to stop.
+    const legacy = join(dir, "rate-limits.json");
+    await writeFile(legacy, "{}", "utf8");
+    await denyRead(legacy, true);
+    denied.push(legacy);
+    let otherCalls = 0;
+    const other = { key: `account:${OTHER_EMAIL}`, label: OTHER_EMAIL, unavailable: false };
+    const live = await getUsageSnapshot({ codexHome: root, now, fetcher: async () => { otherCalls += 1; return { ...RAW, account: { email: OTHER_EMAIL } }; }, env: {}, identity: other });
+    assert.equal(live.source, "live");
+    assert.equal(otherCalls, 1);
+  } finally {
+    for (const path of denied) await denyRead(path, false).catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  }
+});
