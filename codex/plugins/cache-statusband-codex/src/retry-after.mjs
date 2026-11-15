@@ -9,7 +9,8 @@
 //        is a moment as an epoch count (seconds, or milliseconds for retry_at_ms);
 //      * a string: a plain non-negative integer or decimal (read like a number), an HTTP-date, or
 //        an ISO 8601 date-time with a zone (Z, +hh, +hhmm, +hh:mm; no zone = UTC);
-//      * an object {secs, nanos}, {seconds} or {ms};
+//      * an object {secs, nanos}, {seconds} or {ms}, as a wait (never under a retry_at key that
+//        names a moment, where an object cannot be read);
 //      * null or undefined: nothing.
 //    Any other string, object, array or boolean is "named but unreadable", which is the cap.
 // 2. HTTP header LINES in the error message (RFC 9110). The message is split on CRLF, LF or CR. A
