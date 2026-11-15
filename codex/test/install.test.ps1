@@ -1057,10 +1057,11 @@ exit /b 0
   [IO.File]::WriteAllText($swapTarget, "0")
   # The reader runs until the writer says it is finished (a safety deadline only stops a hang),
   # and counts only the opens made while the replacements were running.
-  $swapState = [hashtable]::Synchronized(@{ Writing = $false; Done = $false })
+  $swapState = [hashtable]::Synchronized(@{ Writing = $false; Done = $false; N = 0 })
   $swapReader = Start-ThreadJob -ArgumentList $swapTarget, $swapState -ScriptBlock {
     param($path, $state)
     $missing = 0
+    $missedAt = @()
     $attempts = 0
     $deadline = [DateTime]::UtcNow.AddSeconds(120)
     while (-not $state.Done -and [DateTime]::UtcNow -lt $deadline) {
@@ -1069,14 +1070,16 @@ exit /b 0
         # Opened the way Node and Codex open files: allowing the file to be replaced under it.
         $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
         $stream.Dispose()
-      } catch [IO.FileNotFoundException] { $missing += 1 } catch { }
+      } catch [IO.FileNotFoundException] { $missing += 1; if ($missedAt.Count -lt 10) { $missedAt += "$($state.N): $($_.Exception.Message)" } } catch { }
     }
-    [pscustomobject]@{ Missing = $missing; Attempts = $attempts }
+    [pscustomobject]@{ Missing = $missing; MissedAt = $missedAt; Attempts = $attempts }
   }
   Start-Sleep -Milliseconds 200
+  $script:nativeMoveWarned = $false
   $swapState.Writing = $true
   try {
     for ($n = 1; $n -le 1500; $n += 1) {
+      $swapState.N = $n
       $swapCandidate = Join-Path $swapFolder "candidate-$n.tmp"
       [IO.File]::WriteAllText($swapCandidate, "$n")
       Move-FileOverExisting $swapCandidate $swapTarget
@@ -1085,7 +1088,9 @@ exit /b 0
     $swapState.Done = $true
   }
   $swapResult = Receive-Job -Job $swapReader -Wait -AutoRemoveJob
-  if ($swapResult.Missing -ne 0) { throw "A reader found the replaced file missing $($swapResult.Missing) time(s)" }
+  # If this ever fails again, the message says which replacements left the gap and whether the
+  # native replace was in use, so a real gap can be told from a fault in the test.
+  if ($swapResult.Missing -ne 0) { throw "A reader found the replaced file missing $($swapResult.Missing) time(s) (native replace in use: $(-not $script:nativeMoveWarned); first misses at replacement: $($swapResult.MissedAt -join ' | '))" }
   # The reader must have been opening the file the whole time the replacements ran: a loop
   # that barely opened it could not have caught a gap, so a low count is a failed test.
   if ($swapResult.Attempts -le 100) { throw "The reader opened the file only $($swapResult.Attempts) times while the replacements ran, too few to show the replacements never left a gap" }

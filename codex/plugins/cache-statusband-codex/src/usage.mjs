@@ -262,13 +262,26 @@ export function codexHomeIsMissing(home, stat = statSync) {
 
 // Node cannot spawn codex.cmd (npm installs) without a shell and refuses .cmd/.bat
 // directly. Resolve what to run: CODEX_BIN, else a codex executable found on PATH,
-// with .cmd/.bat wrapped through cmd.exe. On Windows a bare "codex" is never spawned:
+// with .cmd/.bat wrapped through cmd.exe. On Windows every launch runs from the program's own
+// folder with NoDefaultCurrentDirectoryInExePath set (except a .cmd on a UNC share, where only the
+// variable applies), and a bare "codex" is never spawned:
 // Windows looks in the current folder before PATH, so it would run a codex.exe planted in
 // whatever project or folder the command was started from.
 export function resolveCodexLaunch(env = process.env, platform = process.platform, args = ["app-server"]) {
   const configured = env.CODEX_BIN || null;
   const windows = platform === "win32";
   let target = configured;
+  // A CODEX_BIN with no folder in it ("codex.exe", "codex") is a name to look up on PATH, the way
+  // it always was, but only in full-path PATH entries: never the current folder.
+  if (target && windows && !/[\\/:]/.test(target)) {
+    const found = findOnWindowsPath(env, target);
+    if (!found) {
+      const error = new Error(`CODEX_BIN names ${target}, which was not found on PATH. Set CODEX_BIN to its full path.`);
+      error.code = "ENOENT";
+      throw error;
+    }
+    target = found;
+  }
   if (!target && windows) target = findOnWindowsPath(env);
   if (!target && windows) {
     const error = new Error("Codex was not found on PATH. Install Codex or set CODEX_BIN to codex.exe.");
@@ -307,7 +320,8 @@ export function resolveCodexLaunch(env = process.env, platform = process.platfor
     return {
       command: program,
       args,
-      ...(/^[\\/]{2}/.test(program) ? {} : { cwd: win32.dirname(program) }),
+      // Unlike cmd.exe, a program can run from a UNC folder, so a share gets its folder too.
+      cwd: win32.dirname(program),
       guardCurrentFolder: true,
     };
   }
@@ -337,7 +351,11 @@ function absoluteOrNull(value) {
 // A .cmd/.bat wrapper in a directory whose name contains % cannot be run safely through
 // cmd.exe, so look past it for a usable candidate; only when nothing else exists is the
 // unsafe one returned, so that resolveCodexLaunch can explain why it was refused.
-function findOnWindowsPath(env) {
+// name: "codex" (any of .exe, .cmd, .bat) by default, or a CODEX_BIN name, with or without its own extension.
+function findOnWindowsPath(env, name = "codex") {
+  const ownExtension = /\.(exe|cmd|bat|com)$/i.test(name);
+  const base = ownExtension ? name.slice(0, name.lastIndexOf(".")) : name;
+  const extensions = ownExtension ? [name.slice(name.lastIndexOf("."))] : [".exe", ".cmd", ".bat"];
   const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path");
   const directories = String(pathKey ? env[pathKey] : "").split(delimiter).map((value) => value.trim().replace(/^"|"$/g, "")).filter(Boolean);
   let refused = null;
@@ -345,8 +363,8 @@ function findOnWindowsPath(env) {
     // A relative PATH entry (".", say) names the current folder, which is exactly where a planted
     // codex.exe would sit; only absolute folders are searched.
     if (!absoluteOrNull(directory)) continue;
-    for (const extension of [".exe", ".cmd", ".bat"]) {
-      const candidate = join(directory, `codex${extension}`);
+    for (const extension of extensions) {
+      const candidate = join(directory, `${base}${extension}`);
       try {
         if (!statSync(candidate).isFile()) continue;
       } catch (error) {
@@ -354,9 +372,9 @@ function findOnWindowsPath(env) {
         // EACCES but launches fine; accept it when the link itself is there and is not a folder.
         // Only in a WindowsApps folder, where Store aliases live: elsewhere an unreadable file is
         // skipped, so a usable codex later on PATH is still found.
-        if (!(extension === ".exe" && error?.code === "EACCES" && win32.basename(directory).toLowerCase() === "windowsapps" && isLaunchableAlias(candidate))) continue;
+        if (!(extension.toLowerCase() === ".exe" && error?.code === "EACCES" && win32.basename(directory).toLowerCase() === "windowsapps" && isLaunchableAlias(candidate))) continue;
       }
-      if (extension !== ".exe" && candidate.includes("%")) refused ??= candidate;
+      if (!/^\.(exe|com)$/i.test(extension) && candidate.includes("%")) refused ??= candidate;
       else return candidate;
     }
   }
@@ -470,7 +488,8 @@ async function readAccountSession({
   const launch = command === undefined
     ? resolveCodexLaunch(env, platform, args)
     : { command, args: args ?? ["app-server"] };
-  // cmd.exe also honours this, as a second guard against running a program from its working folder.
+  // Windows (and cmd.exe, for a wrapper) then never looks for a program in the working folder: the
+  // guard for a launcher that starts a bare "node", alongside running it from its own folder.
   if (launch.guardCurrentFolder) childEnv.NoDefaultCurrentDirectoryInExePath = "1";
   const child = spawnImpl(launch.command, launch.args, {
     env: childEnv,
@@ -558,7 +577,8 @@ export async function fetchRateLimitsViaAppServer({
   const launch = command === undefined
     ? resolveCodexLaunch(env, platform, args)
     : { command, args: args ?? ["app-server"] };
-  // cmd.exe also honours this, as a second guard against running a program from its working folder.
+  // Windows (and cmd.exe, for a wrapper) then never looks for a program in the working folder: the
+  // guard for a launcher that starts a bare "node", alongside running it from its own folder.
   if (launch.guardCurrentFolder) childEnv.NoDefaultCurrentDirectoryInExePath = "1";
   const child = spawnImpl(launch.command, launch.args, {
     env: childEnv,

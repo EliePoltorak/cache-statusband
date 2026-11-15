@@ -396,9 +396,15 @@ test("resolves a runnable Codex command from CODEX_BIN or the Windows PATH", asy
     assert.equal(relativeWrapper.cwd, win32.resolve("tools"));
     assert.ok(relativeWrapper.args[4].includes(`"${win32.resolve("tools\\codex.cmd")}"`), relativeWrapper.args[4]);
   }
+  // A CODEX_BIN with no folder is a name looked up on full-path PATH entries, never the current folder.
+  assert.equal(resolveCodexLaunch({ CODEX_BIN: "codex.exe", PATH: `${other}${delimiter}.` }, "win32").command, join(other, "codex.exe"));
+  assert.equal(resolveCodexLaunch({ CODEX_BIN: "codex", PATH: other }, "win32").command, join(other, "codex.exe"));
+  assert.throws(() => resolveCodexLaunch({ CODEX_BIN: "codex.exe", PATH: "." }, "win32"), (error) => error.code === "ENOENT" && /CODEX_BIN names codex\.exe/.test(error.message));
   const shared = resolveCodexLaunch({ CODEX_BIN: "\\\\server\\share\\codex.cmd" }, "win32");
   assert.equal(shared.cwd, undefined);
   assert.equal(shared.guardCurrentFolder, true);
+  // A program, unlike cmd.exe, can run from a UNC folder, so a shared codex.exe still gets its own.
+  assert.equal(resolveCodexLaunch({ CODEX_BIN: "\\\\server\\share\\codex.exe" }, "win32").cwd, "\\\\server\\share\\");
   // A relative PATH entry resolves against the current folder, so it is never searched.
   if (process.platform === "win32") {
     assert.throws(() => resolveCodexLaunch({ PATH: relative(process.cwd(), other) }, "win32"), (error) => error.code === "ENOENT");
@@ -1232,9 +1238,9 @@ test("a stored cacheUnwritable or cacheDir is never shown as this call's state",
   const dataDir = join(root, "cache-statusband-codex");
   const name = `rate-limits-${createHash("sha256").update(ACCOUNT_IDENTITY.key).digest("hex").slice(0, 16)}.json`;
   await mkdir(dataDir);
-  await writeFile(join(dataDir, name), JSON.stringify({ version: 3, identityKey: ACCOUNT_IDENTITY.key, accountEmail: TEST_EMAIL, availableCount: 4, fetchedAt: now - 1000, nextAllowedAt: now + 60_000, lastErrorAt: null, cacheUnwritable: true, cacheDir: "C:\elsewhere" }));
+  await writeFile(join(dataDir, name), JSON.stringify({ version: 3, identityKey: ACCOUNT_IDENTITY.key, accountEmail: TEST_EMAIL, availableCount: 4, fetchedAt: now - 1000, nextAllowedAt: now + 60_000, lastErrorAt: null, cacheUnwritable: true, cacheDir: "C:\\elsewhere" }));
   const snapshot = await getUsageSnapshot({ codexHome: root, now, identity: ACCOUNT_IDENTITY, fetcher: async () => { throw new Error("must not read"); }, cacheOnly: true });
   assert.equal(snapshot.availableCount, 4);
   assert.notEqual(snapshot.cacheUnwritable, true);
-  assert.notEqual(snapshot.cacheDir, "C:\elsewhere");
+  assert.notEqual(snapshot.cacheDir, "C:\\elsewhere");
 });
