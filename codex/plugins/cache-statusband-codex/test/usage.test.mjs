@@ -1411,3 +1411,17 @@ test("account keys fold ASCII capitals only, so a Kelvin sign is not read as a k
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a saved session identity folds its key exactly as a fresh capture does", async () => {
+  const root = await mkdtemp(join(tmpdir(), "csb-fold-same-"));
+  try {
+    for (const [index, email] of ["\u212Aate@example.invalid", "\u00DCnal@Example.invalid", "Kate@example.invalid"].entries()) {
+      const captured = await captureUsageIdentity(root, { env: {}, accountReader: async () => ({ email }) });
+      await getSessionIdentity(root, `fold-${index}`, async () => captured);
+      const loaded = await getSessionIdentity(root, `fold-${index}`, async () => { throw new Error("must not capture"); });
+      assert.equal(loaded.key, captured.key);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

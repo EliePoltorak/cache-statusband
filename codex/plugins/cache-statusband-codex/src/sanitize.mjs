@@ -15,3 +15,9 @@ export function hasControl(value) {
 export function stripControls(value) {
   return String(value ?? "").replace(CONTROLS, " ").trim();
 }
+
+// Folds ASCII capitals only. Full Unicode case mapping would merge distinct addresses (the
+// Kelvin sign lower-cases to "k"), so every account key and email comparison uses this one.
+export function foldAscii(text) {
+  return text.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+}

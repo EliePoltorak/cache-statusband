@@ -7,7 +7,7 @@ import { createInterface } from "node:readline";
 import { makeFolder, renameWithRetry } from "./atomic.mjs";
 import { MAX_RETRY_AFTER_MS, retryAfterMilliseconds } from "./retry-after.mjs";
 import { acquireLock } from "./lock.mjs";
-import { hasControl, stripControls } from "./sanitize.mjs";
+import { foldAscii, hasControl, stripControls } from "./sanitize.mjs";
 import { configuredSeatIdentity } from "./settings.mjs";
 
 export { MAX_RETRY_AFTER_MS, retryAfterMilliseconds };
@@ -763,9 +763,10 @@ function wellFormedCache(value) {
 async function readScopedCache(path, legacyPath, identity) {
   const scoped = await readCache(path);
   if (scoped || path === legacyPath) return scoped;
-  // Files written before account keys were case-folded carry the email's capitals, so they are
-  // matched without regard to case and adopted under today's key. The per-account file an older
-  // build wrote is newer than the shared one, so it is checked first, as it was then.
+  // Best effort for files unreleased branch builds wrote before account keys were case-folded:
+  // the first file found under the capture's original-case key, then the shared file, is
+  // adopted under today's key. Recency across several such files is not compared; at worst a
+  // stored backoff is missed and one extra read is made, once.
   if (identity?.unfoldedKey && identity.unfoldedKey !== identity.key) {
     const unfolded = await readCache(join(dirname(path), `rate-limits${cacheSuffix({ key: identity.unfoldedKey })}.json`));
     if (sameKey(unfolded?.identityKey, identity.key)) return { ...unfolded, identityKey: identity.key };
@@ -845,12 +846,6 @@ function accountKey(email) {
 function withUnfoldedKey(identity, email) {
   const unfolded = `account:${email}`;
   return unfolded === identity.key ? identity : { ...identity, unfoldedKey: unfolded };
-}
-
-// Only ASCII capitals are folded: full Unicode case mapping would merge distinct addresses
-// (the Kelvin sign lower-cases to "k").
-function foldAscii(text) {
-  return text.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
 }
 
 function sameKey(a, b) {

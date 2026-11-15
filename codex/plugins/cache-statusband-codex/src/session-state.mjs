@@ -3,7 +3,7 @@ import { link, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { makeFolder, renameWithRetry } from "./atomic.mjs";
 import { acquireLock } from "./lock.mjs";
-import { hasControl, stripControls } from "./sanitize.mjs";
+import { foldAscii, hasControl, stripControls } from "./sanitize.mjs";
 
 const STATE_VERSION = 1;
 const SAVE_LOCK_STALE_MS = 10_000;
@@ -81,10 +81,6 @@ async function makeSessionsFolder(codexHome) {
   const dataDir = join(codexHome, "cache-statusband-codex");
   await makeFolder(dataDir);
   await makeFolder(join(dataDir, "sessions"));
-}
-
-function foldAscii(text) {
-  return text.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
 }
 
 function parseIdentity(text) {
