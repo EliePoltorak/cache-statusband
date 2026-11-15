@@ -72,6 +72,12 @@ test("shares one rate-limit read for at least five minutes", async (t) => {
   await assert.rejects(access(join(root, "cache-statusband-codex", `${cacheName}.tmp`)));
 });
 
+// A failed read's backoff starts when the failure arrives, so it runs a little past the
+// injected `now` by however long the (fake) read took.
+function assertDeadline(actual, expected) {
+  assert.ok(actual >= expected && actual < expected + 1_000, `deadline ${actual} is not just after ${expected}`);
+}
+
 test("honors a Retry-After longer than the five-minute floor", async (t) => {
   const root = await fixtureRoot(t);
   const now = Date.parse("2026-10-29T12:00:00.000Z");
@@ -84,7 +90,7 @@ test("honors a Retry-After longer than the five-minute floor", async (t) => {
   };
   const first = await getUsageSnapshot({ codexHome: root, now, fetcher, identity: ACCOUNT_IDENTITY });
   const second = await getUsageSnapshot({ codexHome: root, now: now + 10 * 60_000, fetcher, identity: ACCOUNT_IDENTITY });
-  assert.equal(first.nextAllowedAt, now + 15 * 60_000);
+  assertDeadline(first.nextAllowedAt, now + 15 * 60_000);
   assert.equal(second.source, "cache");
   assert.equal(calls, 1);
   assert.equal(retryAfterMilliseconds({ rpcData: { retryAfterMs: 45_000 } }, now), 45_000);
@@ -111,7 +117,7 @@ test("caps Retry-After at one hour and keeps the last good reading", async (t) =
   assert.equal(failed.availableCount, 2);
   assert.equal(failed.primary.usedPercent, 70);
   assert.equal(failed.fetchedAt, now);
-  assert.equal(failed.nextAllowedAt, now + MIN_POLL_INTERVAL_MS + MAX_RETRY_AFTER_MS);
+  assertDeadline(failed.nextAllowedAt, now + MIN_POLL_INTERVAL_MS + MAX_RETRY_AFTER_MS);
 });
 
 test("a one-hour backoff written by a caller whose clock is a few seconds ahead still holds for a slightly earlier caller", async (t) => {
@@ -130,7 +136,7 @@ test("a one-hour backoff written by a caller whose clock is a few seconds ahead 
       throw error;
     },
   });
-  assert.equal(failed.nextAllowedAt, writerNow + MAX_RETRY_AFTER_MS);
+  assertDeadline(failed.nextAllowedAt, writerNow + MAX_RETRY_AFTER_MS);
   let calls = 0;
   const reader = await getUsageSnapshot({
     codexHome: root,
@@ -140,7 +146,7 @@ test("a one-hour backoff written by a caller whose clock is a few seconds ahead 
   });
   assert.equal(calls, 0, "the backoff holds; no fetch");
   assert.equal(reader.source, "cache");
-  assert.equal(reader.nextAllowedAt, writerNow + MAX_RETRY_AFTER_MS);
+  assertDeadline(reader.nextAllowedAt, writerNow + MAX_RETRY_AFTER_MS);
 });
 
 test("speaks the documented app-server protocol", async () => {
@@ -925,7 +931,7 @@ test("a Retry-After header line of hours is capped at one hour by the caller, an
     identity: ACCOUNT_IDENTITY,
     fetcher: async () => { throw new Error("limited\nRetry-After: 10800"); },
   });
-  assert.equal(failed.nextAllowedAt, now + MAX_RETRY_AFTER_MS);
+  assertDeadline(failed.nextAllowedAt, now + MAX_RETRY_AFTER_MS);
   // The same wait stated only in prose is not read: the normal five-minute floor applies.
   const prose = await getUsageSnapshot({
     codexHome: await fixtureRoot(t),
@@ -933,7 +939,7 @@ test("a Retry-After header line of hours is capped at one hour by the caller, an
     identity: ACCOUNT_IDENTITY,
     fetcher: async () => { throw new Error("limited; retry after 3 hours"); },
   });
-  assert.equal(prose.nextAllowedAt, now + MIN_POLL_INTERVAL_MS);
+  assertDeadline(prose.nextAllowedAt, now + MIN_POLL_INTERVAL_MS);
 });
 
 test("a cache deadline beyond the longest possible backoff does not suppress polling", async (t) => {
@@ -971,11 +977,11 @@ test("a different login is detected before any rate-limit request is made", asyn
   assert.deepEqual(await requests(), ["initialize", "initialized", "account/read"]);
   // Nothing was stored for B, and A is backed off for the usual interval.
   assert.equal((await readdir(join(root, "cache-statusband-codex"))).filter((name) => name.endsWith(".json")).length, 1);
-  assert.equal(mismatched.nextAllowedAt, now + MIN_POLL_INTERVAL_MS);
+  assertDeadline(mismatched.nextAllowedAt, now + MIN_POLL_INTERVAL_MS);
 
   // The same login, spelled in a different case, is the same account.
   await rm(log);
-  const matched = await getUsageSnapshot({ codexHome: root, now: now + MIN_POLL_INTERVAL_MS, identity: ACCOUNT_IDENTITY, fetcher: fakeFetcher(TEST_EMAIL.toUpperCase()) });
+  const matched = await getUsageSnapshot({ codexHome: root, now: mismatched.nextAllowedAt, identity: ACCOUNT_IDENTITY, fetcher: fakeFetcher(TEST_EMAIL.toUpperCase()) });
   assert.equal(matched.source, "live");
   assert.equal(matched.availableCount, 2);
   assert.deepEqual((await requests()).filter((name) => name === "account/rateLimits/read"), ["account/rateLimits/read"]);
@@ -1424,4 +1430,17 @@ test("a saved session identity folds its key exactly as a fresh capture does", a
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("a relative Retry-After counts from when the failure arrived, not from before the read", async (t) => {
+  const root = await fixtureRoot(t);
+  const now = Date.parse("2026-10-29T12:00:00.000Z");
+  const fetcher = async () => {
+    await new Promise((done) => setTimeout(done, 400));
+    throw Object.assign(new Error("limited"), { rpcData: { retry_after: 600 } });
+  };
+  const failed = await getUsageSnapshot({ codexHome: root, now, fetcher, identity: ACCOUNT_IDENTITY });
+  // The read took ~400 ms, so the 600 s wait must end at least that much after `now + 600 s`.
+  assert.ok(failed.nextAllowedAt >= now + 600_000 + 350, `nextAllowedAt is only ${failed.nextAllowedAt - now} ms after the read began`);
+  assert.ok(failed.lastErrorAt >= now + 350);
 });

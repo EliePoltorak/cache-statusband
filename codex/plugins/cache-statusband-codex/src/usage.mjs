@@ -121,6 +121,9 @@ export async function getUsageSnapshot({
     }
 
     let saved;
+    // A relative Retry-After counts from when the failure arrived, not from before the read:
+    // the read's own start-up and response time must not be deducted from the server's wait.
+    const readStarted = performance.now();
     try {
       // The fetcher is told whose usage is wanted so it can check the login first and
       // send no rate-limit request for any other account (see fetchRateLimitsViaAppServer).
@@ -136,11 +139,12 @@ export async function getUsageSnapshot({
         nextAllowedAt: now + MIN_POLL_INTERVAL_MS,
       };
     } catch (error) {
-      const retryMs = retryAfterMilliseconds(error, now);
+      const failedAt = now + Math.max(0, Math.ceil(performance.now() - readStarted));
+      const retryMs = retryAfterMilliseconds(error, failedAt);
       const failed = {
         ...attempted,
-        nextAllowedAt: now + Math.min(MAX_RETRY_AFTER_MS, Math.max(MIN_POLL_INTERVAL_MS, retryMs ?? 0)),
-        lastErrorAt: now,
+        nextAllowedAt: failedAt + Math.min(MAX_RETRY_AFTER_MS, Math.max(MIN_POLL_INTERVAL_MS, retryMs ?? 0)),
+        lastErrorAt: failedAt,
       };
       await tryWriteCache(cachePath, failed, renameImpl);
       return show(failed, "stale");
