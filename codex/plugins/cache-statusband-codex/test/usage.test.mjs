@@ -383,7 +383,8 @@ test("resolves a runnable Codex command from CODEX_BIN or the Windows PATH", asy
   assert.equal(resolveCodexLaunch({ PATH: other, CODEX_BIN: join(bin, "codex.cmd"), ComSpec }, "win32").windowsVerbatimArguments, true);
   assert.deepEqual(resolveCodexLaunch({ CODEX_BIN: "/opt/codex" }, "linux"), { command: "/opt/codex", args: ["app-server"] });
   assert.deepEqual(resolveCodexLaunch({ PATH: bin }, "linux"), { command: "codex", args: ["app-server"] });
-  assert.deepEqual(resolveCodexLaunch({ PATH: join(root, "empty") }, "win32"), { command: "codex", args: ["app-server"] });
+  // Never a bare name on Windows: it would find a codex.exe in the current folder first.
+  assert.throws(() => resolveCodexLaunch({ PATH: join(root, "empty") }, "win32"), (error) => error.code === "ENOENT" && /not found on PATH/.test(error.message));
 });
 
 test("a codex.cmd whose path contains % is refused rather than expanded by cmd.exe", async (t) => {
@@ -459,17 +460,13 @@ for (const npmShape of process.platform === "win32" ? [false, true] : [false]) {
   const shape = npmShape ? "an npm-style codex.cmd" : "a plain executable";
   for (const [name, reader] of [["account", readAccountViaAppServer], ["rate-limit", fetchRateLimitsViaAppServer]]) {
     test(`a timed-out ${name} read leaves no server behind (${shape})`, async (t) => {
-      // On a loaded machine a cold node start can take longer than the 1.5 s read deadline, so the
-      // server is stopped before it writes its pid: nothing is left running, but nothing was
-      // tested either. Try again, up to three times, until a server is seen starting.
-      let pid = 0;
-      for (let attempt = 1; attempt <= 3 && !pid; attempt += 1) {
-        const root = await fixtureRoot(t);
-        const { pidFile, env, options } = await hungLaunch(root, { npmShape });
-        await assert.rejects(reader({ codexHome: root, env, timeoutMs: 1500, expectedEmail: FAKE_EMAIL, ...options }), /timed out/);
-        pid = Number(await readFile(pidFile, "utf8").catch(() => "0"));
-      }
-      assert.ok(pid, "the hung server never started (no pid file) in three runs");
+      // A 5 s deadline leaves a cold node start at idle priority on a busy machine time to write
+      // its pid, so the test checks a server that really started (one try, so no earlier try's
+      // late-starting server can go unchecked).
+      const root = await fixtureRoot(t);
+      const { pidFile, env, options } = await hungLaunch(root, { npmShape });
+      await assert.rejects(reader({ codexHome: root, env, timeoutMs: 5000, expectedEmail: FAKE_EMAIL, ...options }), /timed out/);
+      const pid = Number(await readFile(pidFile, "utf8"));
       assert.ok(Number.isInteger(pid) && pid > 0);
       // Never killed by pid here: once stopped, its pid may be reused; a server left running ends
       // itself within 30 s.
@@ -835,7 +832,9 @@ test("retry-after in structured error data: every key spelling, numbers, strings
 });
 
 test("retry-after: hostile messages finish quickly and never throw", () => {
-  const started = Date.now();
+  // CPU time, not wall time: at idle priority on a busy machine wall time stretches several-fold,
+  // while a catastrophic regex would take minutes of CPU, not seconds.
+  const started = process.cpuUsage();
   assert.equal(retryAfterMilliseconds({ message: "retry after ".repeat(300_000) }, 0), null);
   assert.equal(retryAfterMilliseconds({ message: "Retry-After: ".repeat(300_000) }, 0), MAX_RETRY_AFTER_MS);
   assert.equal(retryAfterMilliseconds({ message: `retry after${" ".repeat(300_000)}5` }, 0), null);
@@ -849,7 +848,9 @@ test("retry-after: hostile messages finish quickly and never throw", () => {
   assert.equal(retryAfterMilliseconds({ message: `Retry-After: ${'"'.repeat(100_000)}5` }, 0), MAX_RETRY_AFTER_MS);
   assert.equal(retryAfterMilliseconds({ message: `retry after ${"Mon".repeat(30_000)}` }, 0), null);
   assert.equal(retryAfterMilliseconds({ message: `Retry-After: ${"Mon, 01 ".repeat(30_000)}` }, 0), MAX_RETRY_AFTER_MS);
-  assert.ok(Date.now() - started < 3000, `took ${Date.now() - started} ms`);
+  const used = process.cpuUsage(started);
+  const cpuMs = (used.user + used.system) / 1000;
+  assert.ok(cpuMs < 3000, `took ${Math.round(cpuMs)} ms of CPU`);
 });
 
 test("a Retry-After header line of hours is capped at one hour by the caller, and a wait stated only in prose is not read", async (t) => {

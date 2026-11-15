@@ -142,3 +142,10 @@ test("a dropped-status count larger than the gap, or with nothing left to list, 
   assert.match(mixed, /5 more reset expirations not listed\./);
   assert.doesNotMatch(mixed, /not supplied by Codex/);
 });
+
+test("a reset title read back from the cache is cleaned of control characters before it is printed", () => {
+  // The cache file is not re-validated on read, so a title written there unclean must not reach the terminal.
+  const text = details({ credits: [{ title: "Bad\u001b[31m\u202eTitle", expiresAt: 1_793_302_971 }], availableCount: 1, source: "cache", fetchedAt: NOW });
+  assert.doesNotMatch(text, /[\u001b\u202e]/);
+  assert.match(text, /Bad \[31m Title/);
+});

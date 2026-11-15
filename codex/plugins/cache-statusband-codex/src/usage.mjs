@@ -262,12 +262,19 @@ export function codexHomeIsMissing(home, stat = statSync) {
 
 // Node cannot spawn codex.cmd (npm installs) without a shell and refuses .cmd/.bat
 // directly. Resolve what to run: CODEX_BIN, else a codex executable found on PATH,
-// with .cmd/.bat wrapped through cmd.exe.
+// with .cmd/.bat wrapped through cmd.exe. On Windows a bare "codex" is never spawned:
+// Windows looks in the current folder before PATH, so it would run a codex.exe planted in
+// whatever project or folder the command was started from.
 export function resolveCodexLaunch(env = process.env, platform = process.platform, args = ["app-server"]) {
   const configured = env.CODEX_BIN || null;
   const windows = platform === "win32";
   let target = configured;
   if (!target && windows) target = findOnWindowsPath(env);
+  if (!target && windows) {
+    const error = new Error("Codex was not found on PATH. Install Codex or set CODEX_BIN to codex.exe.");
+    error.code = "ENOENT";
+    throw error;
+  }
   if (!target) return { command: "codex", args };
   if (windows && /\.(cmd|bat)$/i.test(target)) {
     // cmd.exe expands %VAR% inside a quoted command line and offers no way to escape it.
