@@ -62,6 +62,21 @@ claude plugin install cache-statusband --marketplace Hameishiv/cache-statusband
 
 In the Desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `Hameishiv/cache-statusband`, then **Add plugin**.
 
+### Updates
+
+Claude Code updates a plugin only when auto-update is on for its marketplace, and that is off by default for marketplaces outside Anthropic. Turn it on in `/plugin`, **Marketplaces**, `cache-statusband`, **Enable auto-update**, or in `~/.claude/settings.json`:
+
+```json
+"extraKnownMarketplaces": {
+  "cache-statusband": {
+    "source": { "source": "github", "repo": "Hameishiv/cache-statusband" },
+    "autoUpdate": true
+  }
+}
+```
+
+Claude Code then checks a while after your first message in a session and installs whatever is on `main`. `plugin.json` names no version on purpose: Claude Code treats each new commit as an update, where a version number would have to be raised by hand before anyone received it.
+
 If you also have Nate Herk's `cache-keeper` installed, turn one of them off: they track the same thing.
 
 ## Commands
