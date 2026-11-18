@@ -62,22 +62,22 @@ claude plugin install cache-statusband --marketplace Hameishiv/cache-statusband
 
 In the Desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `Hameishiv/cache-statusband`, then **Add plugin**.
 
+If you also have Nate Herk's `cache-keeper` installed, turn one of them off: they track the same thing.
+
 ### Updates
 
-Claude Code updates a plugin only when auto-update is on for its marketplace, and that is off by default for marketplaces outside Anthropic. Turn it on in `/plugin`, **Marketplaces**, `cache-statusband`, **Enable auto-update**, or in `~/.claude/settings.json`:
+Claude Code installs new versions of a plugin by itself only when auto-update is on for its marketplace, and that is off by default for marketplaces outside Anthropic. Turn it on in `/plugin`, **Marketplaces**, `cache-statusband`, **Turn on auto-update**, or in `~/.claude/settings.json`: installing the plugin already added a `cache-statusband` entry under `extraKnownMarketplaces`, so add `"autoUpdate": true` to that entry rather than pasting a second `extraKnownMarketplaces`. It then reads:
 
 ```json
-"extraKnownMarketplaces": {
-  "cache-statusband": {
-    "source": { "source": "github", "repo": "Hameishiv/cache-statusband" },
-    "autoUpdate": true
-  }
+"cache-statusband": {
+  "source": { "source": "github", "repo": "Hameishiv/cache-statusband" },
+  "autoUpdate": true
 }
 ```
 
-Claude Code then checks a while after your first message in a session and installs whatever is on `main`. `plugin.json` names no version on purpose: Claude Code treats each new commit as an update, where a version number would have to be raised by hand before anyone received it.
+Claude Code then checks a while after your first message in a session and installs whatever is on `main`. The session you are in keeps the version it started with: run `/reload-plugins` when Claude Code says plugins changed, or start a new session. `plugin.json` names no version on purpose: Claude Code treats each new commit as an update, where a version number would have to be raised by hand before anyone received it.
 
-If you also have Nate Herk's `cache-keeper` installed, turn one of them off: they track the same thing.
+Auto-update is skipped, and the menu item hidden, while Claude Code's own updates are off (`DISABLE_AUTOUPDATER`, `DISABLE_UPDATES`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, or `"autoUpdates": false`); set `FORCE_AUTOUPDATE_PLUGINS=1` to update plugins anyway. With auto-update off you can still update by hand: `claude plugin update cache-statusband@cache-statusband`, or **Update marketplace** in `/plugin`.
 
 ## Commands
 
