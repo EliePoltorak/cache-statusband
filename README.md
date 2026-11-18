@@ -75,9 +75,9 @@ Claude Code installs new versions of a plugin by itself only when auto-update is
 }
 ```
 
-Claude Code then checks a while after your first message in a session and installs whatever is on `main`. The session you are in keeps the version it started with: run `/reload-plugins` when Claude Code says plugins changed, or start a new session. `plugin.json` names no version on purpose: Claude Code treats each new commit as an update, where a version number would have to be raised by hand before anyone received it.
+Claude Code then checks a while after your first message in a session and installs whatever is on `main`. The session you are in keeps the version it started with: run `/reload-plugins` when Claude Code says plugins changed (not while a cold chat is compacting, since a reload can drop the messages waiting on it), or start a new session. `plugin.json` names no version on purpose: Claude Code treats each new commit as an update, where a version number would have to be raised by hand before anyone received it.
 
-Auto-update is skipped, and the menu item hidden, while Claude Code's own updates are off (`DISABLE_AUTOUPDATER`, `DISABLE_UPDATES`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, or `"autoUpdates": false`); set `FORCE_AUTOUPDATE_PLUGINS=1` to update plugins anyway. With auto-update off you can still update by hand: `claude plugin update cache-statusband@cache-statusband`, or **Update marketplace** in `/plugin`.
+Auto-update is skipped, and the menu item hidden, while Claude Code's own updates are off: `/doctor` then shows Auto-updates as disabled. In a terminal that usually means `DISABLE_AUTOUPDATER`, `DISABLE_UPDATES` or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set; `FORCE_AUTOUPDATE_PLUGINS=1` updates plugins anyway. With auto-update off you can still update by hand: `claude plugin update cache-statusband@cache-statusband`, or **Update marketplace** in `/plugin`; either one applies the same way, after `/reload-plugins` or in a new session.
 
 ## Commands
 
