@@ -79,7 +79,7 @@ Claude Code then checks in the background and installs whatever is on `main`. `p
 
 An update takes effect once Claude Code restarts, or after `/reload-plugins` (Claude Code's notice that the plugin was updated shows only briefly, so a restart is the dependable route). Don't reload or restart while a cold chat still has messages queued behind its compaction: either one drops the messages not yet sent.
 
-In a terminal, plugin auto-update is skipped, and the menu item hidden, while Claude Code's own auto-updater is turned off, for example by `DISABLE_AUTOUPDATER`, `DISABLE_UPDATES` or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`; `FORCE_AUTOUPDATE_PLUGINS=1` updates plugins anyway. From a terminal you can always update by hand: `claude plugin update cache-statusband@cache-statusband`, or **Update marketplace** in `/plugin`.
+In a terminal, plugin auto-update is skipped, and the menu item hidden, while Claude Code's own auto-updater is turned off, for example by `DISABLE_AUTOUPDATER`, `DISABLE_UPDATES` or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`; setting the environment variable `FORCE_AUTOUPDATE_PLUGINS` to `1` before starting Claude Code updates plugins anyway. From a terminal you can always update by hand: `claude plugin update cache-statusband@cache-statusband`, or **Update marketplace** in `/plugin`.
 
 ## Commands
 
