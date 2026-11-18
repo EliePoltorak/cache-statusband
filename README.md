@@ -64,6 +64,23 @@ In the Desktop app, where `/plugin` does not run: click **+** next to the prompt
 
 If you also have Nate Herk's `cache-keeper` installed, turn one of them off: they track the same thing.
 
+### Updates
+
+Claude Code installs new versions of a plugin by itself only when auto-update is on for its marketplace, and that is off by default for marketplaces outside Anthropic. Turn it on in `/plugin`, **Marketplaces**, `cache-statusband`, **Turn on auto-update**, or in `~/.claude/settings.json`. Installing the plugin usually adds a `cache-statusband` entry under `extraKnownMarketplaces` already: add `"autoUpdate": true` to that entry rather than pasting a second `extraKnownMarketplaces`. If there is no entry, add this one under `extraKnownMarketplaces`:
+
+```json
+"cache-statusband": {
+  "source": { "source": "github", "repo": "Hameishiv/cache-statusband" },
+  "autoUpdate": true
+}
+```
+
+Claude Code then checks in the background and installs whatever is on `main`. `.claude-plugin/plugin.json` names no version on purpose: Claude Code treats each new commit as an update, where a version number would have to be raised by hand before anyone received it.
+
+An update takes effect once Claude Code restarts, or after `/reload-plugins` (Claude Code's notice that the plugin was updated shows only briefly, so a restart is the dependable route). Don't reload or restart while a cold chat still has messages queued behind its compaction: either one drops the messages not yet sent.
+
+In a terminal, plugin auto-update is skipped, and the menu item hidden, while Claude Code's own auto-updater is turned off, for example by `DISABLE_AUTOUPDATER`, `DISABLE_UPDATES` or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`; setting the environment variable `FORCE_AUTOUPDATE_PLUGINS` to `1` before starting Claude Code updates plugins anyway. From a terminal you can always update by hand: `claude plugin update cache-statusband@cache-statusband`, or **Update marketplace** in `/plugin`.
+
 ## Commands
 
 | Command | What it does |
