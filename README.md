@@ -51,16 +51,16 @@ Two MIT-licensed projects made this possible.
 At the prompt of a terminal session:
 
 ```
-/plugin install cache-statusband --marketplace Hameishiv/cache-statusband
+/plugin install cache-statusband --marketplace EliePoltorak/cache-statusband
 ```
 
 From a shell:
 
 ```bash
-claude plugin install cache-statusband --marketplace Hameishiv/cache-statusband
+claude plugin install cache-statusband --marketplace EliePoltorak/cache-statusband
 ```
 
-In the Desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `Hameishiv/cache-statusband`, then **Add plugin**.
+In the Desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `EliePoltorak/cache-statusband`, then **Add plugin**.
 
 If you also have Nate Herk's `cache-keeper` installed, turn one of them off: they track the same thing.
 
@@ -70,7 +70,7 @@ Claude Code installs new versions of a plugin by itself only when auto-update is
 
 ```json
 "cache-statusband": {
-  "source": { "source": "github", "repo": "Hameishiv/cache-statusband" },
+  "source": { "source": "github", "repo": "EliePoltorak/cache-statusband" },
   "autoUpdate": true
 }
 ```

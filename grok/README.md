@@ -30,7 +30,7 @@ The Claude Code mod this is ported from, and the two projects it is built on, ar
 
 - **[Cache Keeper](https://github.com/nateherkai/claude-code-mods) by Nate Herk.** Warm/cold tracking, keep-warm, the cold-send guard, and `/board`.
 - **[ccstatusline](https://github.com/sirmalloc/ccstatusline) by Matthew Breedlove (sirmalloc).** The coloured segments, the arrow between them, and the choice of model, effort, context, and usage windows. No ccstatusline code is included.
-- **[cache-statusband](https://github.com/Hameishiv/cache-statusband)** for Claude Code, by Hameishiv. The status band, the usage readings, and measuring a reopened chat. This port started from that description. No file from that repo is copied here.
+- **[cache-statusband](https://github.com/EliePoltorak/cache-statusband)** for Claude Code, by Hameishiv. The status band, the usage readings, and measuring a reopened chat. This port started from that description. No file from that repo is copied here.
 
 ## Install
 

@@ -177,7 +177,7 @@ This port exists because of:
 
 - [Cache Keeper](https://github.com/nateherkai/claude-code-mods) by **Nate Herk** (MIT). Its cache/session workflow is the origin of the mod family.
 - [ccstatusline](https://github.com/sirmalloc/ccstatusline) by **Matthew Breedlove / sirmalloc** (MIT). Its status-band design and choice of live fields inspired the original display. No ccstatusline code is included.
-- The [Claude Code original, cache-statusband](https://github.com/Hameishiv/cache-statusband), which combined those ideas and supplied the feature set evaluated for this Codex port.
+- The [Claude Code original, cache-statusband](https://github.com/EliePoltorak/cache-statusband), which combined those ideas and supplied the feature set evaluated for this Codex port.
 
 ## License
 
